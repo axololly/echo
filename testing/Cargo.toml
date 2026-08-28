@@ -1,0 +1,16 @@
+[package]
+name = "testing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+echo-server = { path = "../echo-server" }
+echo-types = { path = "../echo-types" }
+pgtemp = "0.7.1"
+quinn = "0.11.11"
+rcgen = "0.14.9"
+rootcause = "0.13.0"
+rustls-pki-types = "1.15.1"
+sqlx = { version = "0.9.0", features = ["postgres", "runtime-tokio", "tls-rustls-ring"] }
+tokio = { version = "1.53.1", features = ["full"] }
+webpki-roots = "1.0.9"

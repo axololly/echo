@@ -1,0 +1,3 @@
+- check out `crabtime`
+- add config file in TOML format
+- add abstraction over groups and direct messages called `Conversation` for sending messages

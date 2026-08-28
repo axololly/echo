@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = [
+    "echo-client",
+    "echo-server",
+    "echo-server-derive",
+    "echo-types",
+    "testing"
+]

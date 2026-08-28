@@ -1,0 +1,24 @@
+[package]
+name = "echo-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argon2 = { version = "0.5.3", features = ["std"] }
+async-trait = "0.1.92"
+bitcode = { version = "0.6.9", features = ["serde"] }
+blake3 = "1.8.6"
+chacha20poly1305 = "0.11.0"
+chrono = { version = "0.4.45", features = ["serde"] }
+ferroid = { version = "2.0.0", features = ["std", "snowflake"] }
+hex = "0.4.3"
+hkdf = { version = "0.13.0", features = ["kdf"] }
+p256 = { version = "0.14.0", features = ["serde"] }
+quinn = "0.11.11"
+rand = "0.10.2"
+rootcause = "0.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", features = ["chrono", "postgres"] }
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["full"] }
