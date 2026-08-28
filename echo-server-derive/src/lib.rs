@@ -142,6 +142,12 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         pub struct #fn_name;
 
+        impl #fn_name {
+            pub async fn call(&self, ctx: &mut EchoContext) -> #ret_type {
+                #callback
+            }
+        }
+
         #[::async_trait::async_trait]
         impl crate::router::Route<EchoContext> for #fn_name {
             fn resource(&self) -> &'static str {

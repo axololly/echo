@@ -143,6 +143,9 @@ impl EchoRouter {
 
         // Group routes
         router.register_route(create_new_group).await;
+        router.register_route(get_group).await;
+        router.register_route(join_new_group).await;
+        router.register_route(leave_group).await;
 
         // User routes
         router.register_route(create_new_user).await;

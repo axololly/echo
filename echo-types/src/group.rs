@@ -15,7 +15,8 @@ pub struct Group {
     pub id: SnowflakeID,
     pub name: String,
     pub avatar: AssetID,
-    pub members: Vec<GroupMember>
+    pub members: Vec<GroupMember>,
+    pub invite_code: String
 }
 
 impl Group {
