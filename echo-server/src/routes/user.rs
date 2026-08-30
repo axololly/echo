@@ -302,4 +302,22 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     Ok(())
 }
 
-// TODO: add a resource for resetting a user's password
+#[route("users.reset-password")]
+pub async fn reset_user_password(ctx: &mut EchoContext) -> RouteResult<()> {
+    let new_secret: PasswordProtected<Secret> = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    let user = ctx.user.unwrap();
+
+    execute!(
+        &ctx.pool,
+        "UPDATE users SET secret = $2 WHERE user_id = $1",
+        user,
+        new_secret
+    );
+
+    Ok(())
+}
