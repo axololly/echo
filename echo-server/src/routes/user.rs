@@ -301,3 +301,5 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     Ok(())
 }
+
+// TODO: add a resource for resetting a user's password

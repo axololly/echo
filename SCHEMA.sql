@@ -83,7 +83,7 @@ CREATE TABLE group_members (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    user_id INT8 REFERENCES groups(id)
+    user_id INT8 REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -93,3 +93,15 @@ CREATE TABLE group_members (
 );
 
 CREATE INDEX idx_group_member_ids ON group_members(user_id);
+
+CREATE TABLE group_banned_members (
+    group_id INT8 REFERENCES groups(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    user_id INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    PRIMARY KEY (group_id, user_id)
+);

@@ -6,7 +6,8 @@ use crate::{Message, SnowflakeID};
 pub enum SystemEvent {
     MemberJoined(SnowflakeID),
     MemberLeft(SnowflakeID),
-    MemberRemoved(SnowflakeID)
+    MemberKicked(SnowflakeID),
+    MemberBanned(SnowflakeID)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -3,7 +3,7 @@ use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_opt_as, fetch_opt_scalar, route};
+use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, route};
 use echo_types::{AssetID, DEFAULT_PFP_ASSET_ID, Group, GroupMember, SNOWFLAKE_GEN, SnowflakeID};
 
 use crate::router::EchoContext;
@@ -16,8 +16,14 @@ pub enum GroupRouteError {
     #[error("no group found")]
     GroupNotFound,
 
+    #[error("you are banned from that group")]
+    BannedFromGroup,
+
     #[error("only accessible by the owner")]
-    OnlyForOwner
+    OnlyForOwner,
+
+    #[error("this interaction is not applicable for the owner (kick/ban/unban)")] // TODO: this needs functionality
+    NotForOwner
 }
 
 use GroupRouteError as G;
@@ -34,7 +40,7 @@ async fn get_group_from_db(
 
     let (name, avatar, invite_code) = data;
 
-    let stmt = "SELECT user_id, joined_at FROM groups WHERE group_id = $1";
+    let stmt = "SELECT user_id, joined_at FROM group_members WHERE group_id = $1";
 
     let members = fetch_all_as!(&ctx.pool, stmt, id);
 
@@ -192,7 +198,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     Ok(group)
 }
 
-#[route("groups.join")]
+#[route("groups.join")] // TODO: notify other users about this and register their conversation keys
 pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let invite_code: String = ctx
         .conn
@@ -211,6 +217,18 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     };
 
     let user = ctx.user.unwrap();
+
+    let maybe_ban_entry: Option<i8> = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT 1 FROM group_members_banned WHERE group_id = $1 AND user_id = $2",
+        group_id,
+        user
+    );
+
+    if maybe_ban_entry.is_some() {
+        bail!(E::Group(G::BannedFromGroup));
+    }
+
     let now = Utc::now();
 
     execute!(
@@ -224,7 +242,7 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     get_group_from_db(ctx, id).await
 }
 
-#[route("groups.leave")]
+#[route("groups.leave")] // TODO: notify other users about this and remove their conversation keys
 pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
@@ -285,6 +303,22 @@ pub async fn get_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String>
     Ok(code)
 }
 
+async fn get_group_owner(
+    ctx: &mut EchoContext,
+    group_id: SnowflakeID
+) -> RouteResult<SnowflakeID> {
+    let stmt = "
+        SELECT user_id FROM group_members
+        WHERE group_id = $1
+        ORDER BY joined_at
+        LIMIT 1
+    ";
+
+    let user_id = fetch_one_scalar!(&ctx.pool, stmt, group_id);
+
+    Ok(user_id)
+}
+
 #[route("groups.invite.rotate")]
 pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String> {
     let user = ctx.user.unwrap();
@@ -294,6 +328,10 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Stri
         .receive()
         .await
         .context(E::InvalidData)?;
+
+    if user != get_group_owner(ctx, group_id).await? {
+        bail!(E::Group(G::OnlyForOwner));
+    }
 
     let stmt = "
         SELECT 1 FROM group_members
@@ -354,3 +392,129 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Stri
 
     Ok(new_invite_code)
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct RemoveGroupMemberData {
+    pub group_id: SnowflakeID,
+    pub member_id: SnowflakeID
+}
+
+#[route("groups.members.kick")]
+pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+
+    let RemoveGroupMemberData {
+        group_id,
+        member_id
+    } = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    if user != get_group_owner(ctx, group_id).await? {
+        bail!(E::Group(G::OnlyForOwner));
+    }
+
+    if user == member_id {
+        bail!(E::Group(G::NotForOwner));
+    }
+
+    execute!(
+        &ctx.pool,
+        "REMOVE FROM group_members WHERE group_id = $1 AND user_id = $2",
+        group_id,
+        member_id
+    );
+
+    Ok(())
+}
+
+#[route("groups.members.ban")]
+pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+
+    let RemoveGroupMemberData {
+        group_id,
+        member_id
+    } = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    if user != get_group_owner(ctx, group_id).await? {
+        bail!(E::Group(G::OnlyForOwner));
+    }
+
+    if user == member_id {
+        bail!(E::Group(G::NotForOwner));
+    }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    execute!(
+        &mut *tx,
+        "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2",
+        group_id,
+        member_id
+    );
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO group_members_banned (group_id, user_id) VALUES ($1, $2)",
+        group_id,
+        member_id
+    );
+
+    tx.commit().await.context(E::Database)?;
+
+    Ok(())
+}
+
+#[route("groups.members.unban")]
+pub async fn unban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+
+    let RemoveGroupMemberData {
+        group_id,
+        member_id
+    } = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    if user != get_group_owner(ctx, group_id).await? {
+        bail!(E::Group(G::OnlyForOwner));
+    }
+
+    if user == member_id {
+        bail!(E::Group(G::NotForOwner));
+    }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    execute!(
+        &mut *tx,
+        "DELETE FROM group_members_banned WHERE group_id = $1 AND user_id = $2",
+        group_id,
+        member_id
+    );
+
+    tx.commit().await.context(E::Database)?;
+
+    Ok(())
+}
+
+// TODO: add the following:
+// * groups.metadata.edit (change the profile picture or name of the group chat)
+// * groups.delete (remove everything about a group chat)
