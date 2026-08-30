@@ -27,14 +27,13 @@ async fn get_group_from_db(
     let stmt = "SELECT name, avatar, invite_code FROM groups WHERE id = $1";
 
     let data: (String, AssetID, String) = fetch_opt_as!(&ctx.pool, stmt, id)
-        .context(E::Database)?
         .context(E::Group(G::GroupNotFound))?;
 
     let (name, avatar, invite_code) = data;
 
     let stmt = "SELECT user_id, joined_at FROM groups WHERE group_id = $1";
 
-    let members = fetch_all_as!(&ctx.pool, stmt, id).context(E::Database)?;
+    let members = fetch_all_as!(&ctx.pool, stmt, id);
 
     Ok(Group {
         id,
@@ -122,7 +121,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         group_id,
         &name,
         &*DEFAULT_PFP_ASSET_ID
-    ).context(E::Database)?;
+    );
 
     let owner_join_time = Utc::now();
     let other_join_time = owner_join_time + TimeDelta::seconds(1);
@@ -133,7 +132,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         group_id,
         owner,
         owner_join_time
-    ).context(E::Database)?;
+    );
 
     for other_user in &initial_members {
         execute!(
@@ -142,7 +141,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
             group_id,
             other_user,
             other_join_time
-        ).context(E::Database)?;
+        );
     }
 
     let mut members = vec![GroupMember {
@@ -212,7 +211,7 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         group_id,
         user,
         now
-    ).context(E::Database)?;
+    );
 
     get_group_from_db(ctx, id).await
 }

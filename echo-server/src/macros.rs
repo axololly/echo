@@ -10,6 +10,7 @@ macro_rules! fetch_one {
         query
             .fetch_one($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -25,6 +26,7 @@ macro_rules! fetch_one_as {
         query
             .fetch_one($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -40,6 +42,7 @@ macro_rules! fetch_one_scalar {
         query
             .fetch_one($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -55,6 +58,7 @@ macro_rules! fetch_opt {
         query
             .fetch_optional($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -70,6 +74,7 @@ macro_rules! fetch_opt_as {
         query
             .fetch_optional($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -85,6 +90,7 @@ macro_rules! fetch_opt_scalar {
         query
             .fetch_optional($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -100,6 +106,7 @@ macro_rules! fetch_all {
         query
             .fetch_all($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -115,6 +122,7 @@ macro_rules! fetch_all_as {
         query
             .fetch_all($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -130,6 +138,7 @@ macro_rules! fetch_all_scalar {
         query
             .fetch_all($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }
 
@@ -145,5 +154,6 @@ macro_rules! execute {
         query
             .execute($conn)
             .await
+            .context($crate::error::RouteError::Database)?
     }};
 }

@@ -6,8 +6,9 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use echo_server::{connection::Connection, error::RouteError, router::EchoRouter, runner::run, routes::CreateNewUserData};
-use echo_types::{PasswordProtected, Secret, User, UserSettings, UserState};
+use echo_types::{PasswordProtected, Secret, User, UserSettings};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
+use vodozemac::olm::Account;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -93,19 +94,19 @@ async fn main() -> Result<()> {
 
     let secret = Secret::random();
 
+    let olm_account = Account::new(); // TODO: use this to test out messaging
+
     let data = CreateNewUserData {
         username: "axo".to_string(),
         secret: PasswordProtected::new(&secret, "6767"),
-        state: secret.encrypt(&UserState {
-            settings: UserSettings {
-                cache_secret_for: 0,
-                logout_after: 0,
-                enable_read_receipts: true,
-                enable_typing_indicators: true,
-                ignore_future_requests_from: vec![]
-            }
+        settings: secret.encrypt(&UserSettings {
+            cache_secret_for: 0,
+            logout_after: 0,
+            enable_read_receipts: true,
+            enable_typing_indicators: true
         }),
-        signature_verifier: secret.into()
+        signature_verifier: secret.into(),
+        olm_account: secret.encrypt(&olm_account.pickle())
     };
 
     conn.send(&data).await?;

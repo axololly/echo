@@ -18,7 +18,7 @@ pub async fn validate_user(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
         &ctx.pool,
         "SELECT signature_verifier FROM users WHERE id = ?",
         id
-    ).context(E::Database)?;
+    );
 
     if !signed_id.verify(id, verifier) {
         bail!(E::UserAuthFailed);

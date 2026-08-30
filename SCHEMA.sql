@@ -15,8 +15,12 @@ CREATE TABLE users (
     activity "Activity",
     about_me TEXT CHECK (char_length(about_me) <= 2000),
     status TEXT CHECK (char_length(status) <= 200),
-    encrypted_secret BYTEA, -- TODO: add length check
-    encrypted_state BYTEA,
+    secret BYTEA -- TODO: add length check
+);
+
+CREATE TABLE users_crypto (
+    olm_account BYTEA,
+    settings BYTEA,
     signature_verifier BYTEA CHECK (length(signature_verifier) = 32)
 );
 

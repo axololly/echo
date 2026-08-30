@@ -1,7 +1,8 @@
-use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserState};
+use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserSettings};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use vodozemac::olm::AccountPickle;
 
 use crate::{error::{RouteError as E, RouteResult}, execute, fetch_opt, fetch_opt_as, route, router::EchoContext};
 
@@ -42,7 +43,6 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     ";
 
     let user: User = fetch_opt_as!(&ctx.pool, stmt, user_id)
-        .context(E::Database)?
         .context(E::User(U::UserNotFound))?;
 
     Ok(user)
@@ -52,8 +52,9 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
 pub struct CreateNewUserData {
     pub username: String,
     pub secret: PasswordProtected<Secret>,
-    pub state: Encrypted<UserState>,
-    pub signature_verifier: SignatureVerifier
+    pub settings: Encrypted<UserSettings>,
+    pub signature_verifier: SignatureVerifier,
+    pub olm_account: Encrypted<AccountPickle>
 }
 
 #[route("users.create")]
@@ -63,8 +64,9 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let CreateNewUserData {
         username,
         secret,
-        state,
-        signature_verifier
+        settings,
+        signature_verifier,
+        olm_account
     } = ctx
         .conn
         .receive()
@@ -75,7 +77,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &ctx.pool,
         "SELECT 1 FROM users WHERE name = $1",
         &username
-    ).context(E::Database)?;
+    );
 
     if row.is_some() {
         bail!(E::User(U::UsernameAlreadyTaken));
@@ -91,9 +93,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         activity: Activity::Online,
         about_me: String::new(),
         status: String::new(),
-        secret,
-        state,
-        signature_verifier
+        secret
     };
 
     let stmt = "
@@ -106,9 +106,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
             about_me,
             status,
             encrypted_secret,
-            encrypted_state,
-            signature_verifier
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ";
 
     execute!(
@@ -121,10 +119,24 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.activity,
         &user.about_me,
         &user.status,
-        &user.secret,
-        &user.state,
-        &user.signature_verifier
-    ).context(E::Database)?;
+        &user.secret
+    );
+
+    let stmt = "
+        INSERT INTO users_crypto (
+            olm_account,
+            settings,
+            signature_verifier
+        ) VALUES ($1, $2, $3)
+    ";
+
+    execute!(
+        &ctx.pool,
+        stmt,
+        &olm_account,
+        &settings,
+        &signature_verifier
+    );
 
     Ok(user)
 }
