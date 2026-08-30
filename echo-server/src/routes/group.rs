@@ -14,7 +14,10 @@ pub enum GroupRouteError {
     FailedFriendConstaint,
 
     #[error("no group found")]
-    GroupNotFound
+    GroupNotFound,
+
+    #[error("only accessible by the owner")]
+    OnlyForOwner
 }
 
 use GroupRouteError as G;
@@ -246,4 +249,108 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     }
 
     Ok(())
+}
+
+#[route("groups.invite.get")]
+pub async fn get_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String> {
+    let user = ctx.user.unwrap();
+
+    let group_id: SnowflakeID = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    let stmt = "
+        SELECT invite_code FROM groups
+        WHERE id = $1
+        AND EXISTS(
+            SELECT 1 FROM group_members
+            WHERE group_id = $1
+            AND user_id = $2
+        )
+    ";
+
+    let invite_code: Option<String> = fetch_opt_scalar!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        user
+    );
+
+    let Some(code) = invite_code else {
+        bail!(E::Group(G::GroupNotFound));
+    };
+
+    Ok(code)
+}
+
+#[route("groups.invite.rotate")]
+pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String> {
+    let user = ctx.user.unwrap();
+
+    let group_id: SnowflakeID = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    let stmt = "
+        SELECT 1 FROM group_members
+        WHERE group_id = $1
+        AND user_id = $2
+    ";
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    let row: Option<i8> = fetch_opt_scalar!(
+        &mut *tx,
+        stmt,
+        group_id,
+        user
+    );
+
+    if row.is_none() {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let is_code_valid = async |code: &str| -> RouteResult<bool> {
+        let stmt = "
+            SELECT 1 FROM groups
+            WHERE id = $1
+            AND invite_code = $2
+        ";
+
+        let row: Option<i8> = fetch_opt_scalar!(
+            &ctx.pool,
+            stmt,
+            group_id,
+            code
+        );
+
+        Ok(row.is_some())
+    };
+
+    let new_invite_code = loop {
+        let code = generate_random_invite_code();
+
+        if is_code_valid(&code).await? {
+            break code;
+        }
+    };
+
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET invite_code = $2 WHERE id = $1",
+        group_id,
+        &new_invite_code
+    );
+
+    tx.commit().await.context(E::Database)?;
+
+    Ok(new_invite_code)
 }
