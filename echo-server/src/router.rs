@@ -150,6 +150,12 @@ impl EchoRouter {
         // User routes
         router.register_route(create_new_user).await;
         router.register_route(get_user).await;
+        router.register_route(get_user_crypto).await;
+        router.register_route(get_user_data).await;
+        router.register_route(get_friends).await;
+        router.register_route(get_friend_requests).await;
+        router.register_route(create_new_friend_request).await;
+        router.register_route(accept_friend_request).await;
 
         router
     }

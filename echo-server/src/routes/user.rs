@@ -1,10 +1,11 @@
-use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserSettings};
+use chrono::Utc;
+use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, FriendRequest, OneTimeKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserCrypto, UserData, UserSettings};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vodozemac::olm::AccountPickle;
 
-use crate::{error::{RouteError as E, RouteResult}, execute, fetch_opt, fetch_opt_as, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_all_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
 
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum UserRouteError {
@@ -12,13 +13,18 @@ pub enum UserRouteError {
     UsernameAlreadyTaken,
 
     #[error("no user with that ID")]
-    UserNotFound
+    UserNotFound,
+
+    #[error("already sent a friend request to that user")]
+    FriendRequestAlreadySent,
+
+    #[error("cannot send a friend request to someone you are already friends with")]
+    AlreadyFriends
 }
 
 use UserRouteError as U;
 
 #[route("users.get")]
-#[ratelimit(10, 1m)]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
         .conn
@@ -48,6 +54,40 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     Ok(user)
 }
 
+#[route("users.data.get")]
+pub async fn get_user_data(ctx: &mut EchoContext) -> RouteResult<UserData> {
+    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+        .conn
+        .receive()
+        .await
+        .map_err(|_| E::InvalidData)?;
+
+    let user_data: UserData = fetch_opt_as!(
+        &ctx.pool,
+        "SELECT olm_account, settings FROM users WHERE id = $1",
+        user_id
+    ).context(E::User(U::UserNotFound))?;
+
+    Ok(user_data)
+}
+
+#[route("users.crypto.get")]
+pub async fn get_user_crypto(ctx: &mut EchoContext) -> RouteResult<UserCrypto> {
+    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+        .conn
+        .receive()
+        .await
+        .map_err(|_| E::InvalidData)?;
+
+    let user_crypto: UserCrypto = fetch_opt_as!(
+        &ctx.pool,
+        "SELECT signature_verifier FROM users WHERE id = $1",
+        user_id
+    ).context(E::User(U::UserNotFound))?;
+
+    Ok(user_crypto)
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct CreateNewUserData {
     pub username: String,
@@ -58,7 +98,6 @@ pub struct CreateNewUserData {
 }
 
 #[route("users.create")]
-#[ratelimit(1, 1h)]
 #[no_auth] // TODO: make sure this doesn't get abused
 pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let CreateNewUserData {
@@ -96,6 +135,12 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         secret
     };
 
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
     let stmt = "
         INSERT INTO users (
             id,
@@ -105,12 +150,12 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
             activity,
             about_me,
             status,
-            encrypted_secret,
+            secret
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ";
 
     execute!(
-        &ctx.pool,
+        &mut *tx,
         stmt,
         &user.id,
         &user.name,
@@ -122,21 +167,137 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.secret
     );
 
-    let stmt = "
-        INSERT INTO users_crypto (
-            olm_account,
-            settings,
-            signature_verifier
-        ) VALUES ($1, $2, $3)
-    ";
+    execute!(
+        &mut *tx,
+        "INSERT INTO users_data (user_id, olm_account, settings) VALUES ($1, $2, $3)",
+        &user.id,
+        &olm_account,
+        &settings
+    );
 
     execute!(
-        &ctx.pool,
-        stmt,
-        &olm_account,
-        &settings,
+        &mut *tx,
+        "INSERT INTO users_crypto (user_id, signature_verifier) VALUES ($1, $2)",
+        &user.id,
         &signature_verifier
     );
 
+    tx.commit().await.context(E::Database)?;
+
     Ok(user)
+}
+
+#[route("users.friends.get")]
+pub async fn get_friends(ctx: &mut EchoContext) -> RouteResult<Vec<SnowflakeID>> {
+    let stmt = "
+        SELECT user1 AS id WHERE user2 = $1
+        UNION ALL
+        SELECT user2 AS id WHERE user1 = $1
+    ";
+
+    let friends: Vec<SnowflakeID> = fetch_all_scalar!(&ctx.pool, stmt, ctx.user.unwrap());
+
+    Ok(friends)
+}
+
+#[route("users.friends.requests.get")]
+pub async fn get_friend_requests(ctx: &mut EchoContext) -> RouteResult<Vec<FriendRequest>> {
+    let requests = fetch_all_as!(
+        &ctx.pool,
+        "SELECT sender, one_time_key, sent_at FROM friend_requests WHERE receiver = $1",
+        ctx.user.unwrap()
+    );
+
+    Ok(requests)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateNewFriendRequestData {
+    pub recipient: SnowflakeID,
+    pub one_time_key: OneTimeKey
+}
+
+#[route("users.friends.requests.create")]
+pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+    let CreateNewFriendRequestData {
+        recipient, // TODO: check if they're blocked
+        one_time_key
+    } = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    let sender = ctx.user.unwrap();
+
+    let maybe_already_friends: Option<i8> = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT 1 FROM friendships WHERE user1 = $1 AND user2 = $2",
+        sender.min(recipient),
+        sender.max(recipient)
+    );
+
+    if maybe_already_friends.is_some() {
+        bail!(E::User(U::AlreadyFriends));
+    }
+
+    let maybe_already_sent: Option<i8> = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT 1 FROM friend_requests WHERE sender = $1 AND recipient = $2",
+        sender,
+        recipient
+    );
+
+    if maybe_already_sent.is_some() {
+        bail!(E::User(U::FriendRequestAlreadySent));
+    }
+
+    execute!(
+        &ctx.pool,
+        "INSERT INTO friend_requests (sender, receiver, one_time_key, sent_at) VALUES ($1, $2, $3, $4)",
+        sender,
+        recipient,
+        one_time_key,
+        Utc::now()
+    );
+
+    Ok(())
+}
+
+#[route("users.friends.requests.accept")]
+pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+    let sender: SnowflakeID = ctx
+        .conn
+        .receive()
+        .await
+        .context(E::InvalidData)?;
+
+    let recipient = ctx.user.unwrap();
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    execute!(
+        &mut *tx,
+        "DELETE FROM friend_requests WHERE sender = $1 AND recipient = $2",
+        sender,
+        recipient
+    );
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO friends (user1, user2, friends_since) VALUES ($1, $2, $3)",
+        sender.min(recipient),
+        sender.max(recipient),
+        Utc::now()
+    );
+
+    tx.commit().await.context(E::Database)?;
+
+    // TODO: start a conversation here
+
+    Ok(())
 }

@@ -18,9 +18,20 @@ CREATE TABLE users (
     secret BYTEA -- TODO: add length check
 );
 
-CREATE TABLE users_crypto (
+CREATE TABLE users_data (
+    user_id INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
     olm_account BYTEA,
-    settings BYTEA,
+    settings BYTEA
+);
+
+CREATE TABLE users_crypto (
+    user_id INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
     signature_verifier BYTEA CHECK (length(signature_verifier) = 32)
 );
 
@@ -33,12 +44,32 @@ CREATE TABLE friendships (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
+    friends_since TIMESTAMP NOT NULL,
+
     PRIMARY KEY (user1, user2),
 
     CONSTRAINT check_id_order CHECK (user1 < user2)
 );
 
 CREATE INDEX idx_friendships_user2 ON friendships(user2);
+
+CREATE TABLE friend_requests (
+    sender INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    receiver INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    one_time_key BYTEA CHECK (length(one_time_key) = 32),
+
+    sent_at TIMESTAMP NOT NULL,
+
+    PRIMARY KEY (sender, receiver)
+);
+
+CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);
 
 CREATE TABLE groups (
     id INT8 PRIMARY KEY,

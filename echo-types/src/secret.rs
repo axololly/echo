@@ -67,6 +67,14 @@ impl Secret {
     }
 }
 
+impl Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f
+            .debug_struct("Secret")
+            .finish_non_exhaustive()
+    }
+}
+
 pub const KEY_SIZE: usize = 32;
 pub type EncryptionKey = [u8; KEY_SIZE];
 
@@ -87,11 +95,29 @@ impl From<Secret> for SignatureVerifier {
 
 pub const NONCE_SIZE: usize = 24;
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Encrypted<T> {
     payload: Vec<u8>,
     nonce: [u8; NONCE_SIZE],
     _data: PhantomData<T>,
+}
+
+impl<T> PartialEq for Encrypted<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.payload == other.payload && self.nonce == other.nonce
+    }
+}
+
+impl<T> Eq for Encrypted<T> {}
+
+impl<T> Clone for Encrypted<T> {
+    fn clone(&self) -> Self {
+        Self {
+            payload: self.payload.clone(),
+            nonce: self.nonce,
+            _data: PhantomData
+        }
+    }
 }
 
 impl<T> Debug for Encrypted<T> {
@@ -294,13 +320,15 @@ impl sqlx::Type<sqlx::Postgres> for SignatureVerifier {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Signed<T> {
     value: T,
     raw: P256Signature,
     author: VerifyingKey,
     _data: PhantomData<T>
 }
+
+impl<T: Copy> Copy for Signed<T> {}
 
 impl<T: Serialize> Signed<T> {
     pub fn new(value: T, key: SigningKey) -> Self {
@@ -326,6 +354,15 @@ impl<T: Serialize> Signed<T> {
 
     pub fn value(&self) -> &T {
         &self.value
+    }
+}
+
+impl<T: Debug> Debug for Signed<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f
+            .debug_struct("Signed")
+            .field("value", &self.value)
+            .finish_non_exhaustive()
     }
 }
 

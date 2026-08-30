@@ -45,7 +45,6 @@ async fn get_group_from_db(
 }
 
 #[route("groups.get")]
-#[ratelimit(10, 1m)]
 pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let id: SnowflakeID = ctx
         .conn
@@ -76,7 +75,6 @@ pub struct CreateNewGroupData {
 }
 
 #[route("groups.create")]
-#[ratelimit(3, 2m)]
 pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let CreateNewGroupData {
         name,
@@ -115,8 +113,14 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let group_id = SNOWFLAKE_GEN.next();
 
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
     execute!(
-        &ctx.pool,
+        &mut *tx,
         "INSERT INTO groups (id, name, avatar) VALUES ($1, $2, $3)",
         group_id,
         &name,
@@ -127,7 +131,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let other_join_time = owner_join_time + TimeDelta::seconds(1);
 
     execute!(
-        &ctx.pool,
+        &mut *tx,
         "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
         group_id,
         owner,
@@ -136,13 +140,15 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     for other_user in &initial_members {
         execute!(
-            &ctx.pool,
+            &mut *tx,
             "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
             group_id,
             other_user,
             other_join_time
         );
     }
+
+    tx.commit().await.context(E::Database)?;
 
     let mut members = vec![GroupMember {
         user_id: owner,
@@ -184,7 +190,6 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 }
 
 #[route("groups.join")]
-#[ratelimit(5, 2m)]
 pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let invite_code: String = ctx
         .conn
@@ -217,7 +222,6 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 }
 
 #[route("groups.leave")]
-#[ratelimit(5, 2m)]
 pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
