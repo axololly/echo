@@ -3,12 +3,12 @@ use rootcause::Result;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub struct Connection {
+pub struct Stream {
     sender: quinn::SendStream,
     receiver: quinn::RecvStream
 }
 
-impl Connection {
+impl Stream {
     pub async fn open_bi(parent: &quinn::Connection) -> Result<Self> {
         let (sender, receiver) = parent.open_bi().await?;
 

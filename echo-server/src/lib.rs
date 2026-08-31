@@ -1,5 +1,5 @@
 pub mod auth;
-pub mod connection;
+pub mod stream;
 pub mod error;
 pub mod router;
 pub mod routes;

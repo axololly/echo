@@ -7,7 +7,7 @@ use crate::router::EchoContext;
 
 pub async fn validate_user(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
     let signed_id: Signed<SnowflakeID> = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;

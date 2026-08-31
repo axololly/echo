@@ -5,7 +5,7 @@ use sqlx::postgres::PgPool;
 
 use quinn::{VarInt, crypto::rustls::QuicServerConfig, rustls::{self, pki_types::{CertificateDer, PrivateKeyDer}}};
 
-use crate::{connection::Connection, router::{EchoContext, EchoRouter}};
+use crate::{router::{EchoContext, EchoRouter}, stream::Stream};
 
 pub async fn run(
     local_addr: impl ToSocketAddrs,
@@ -63,13 +63,13 @@ async fn handle_incoming_requests(
     pool: PgPool
 ) -> Result<()> {
     loop {
-        let mut conn = Connection::accept_bi(&parent).await?;
+        let mut stream = Stream::accept_bi(&parent).await?;
 
-        let resource: String = conn.receive().await?;
+        let resource: String = stream.receive().await?;
 
         let ctx = EchoContext {
             resource,
-            conn,
+            stream,
             pool: pool.clone(),
             user: None
         };

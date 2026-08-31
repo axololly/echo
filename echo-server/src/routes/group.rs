@@ -56,7 +56,7 @@ async fn get_group_from_db(
 #[route("groups.get")]
 pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let id: SnowflakeID = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -89,7 +89,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         name,
         initial_members
     } = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -201,7 +201,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 #[route("groups.join")] // TODO: notify other users about this and register their conversation keys
 pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let invite_code: String = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -247,7 +247,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
     let group_id: SnowflakeID = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -274,7 +274,7 @@ pub async fn get_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String>
     let user = ctx.user.unwrap();
 
     let group_id: SnowflakeID = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -324,7 +324,7 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Stri
     let user = ctx.user.unwrap();
 
     let group_id: SnowflakeID = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -407,7 +407,7 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         group_id,
         member_id
     } = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -438,7 +438,7 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         group_id,
         member_id
     } = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -484,7 +484,7 @@ pub async fn unban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         group_id,
         member_id
     } = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;

@@ -170,7 +170,7 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
                     Err(report) => Err(report.current_context())
                 };
 
-                let _ = ctx.conn.send(&stripped).await;
+                let _ = ctx.stream.send(&stripped).await;
 
                 result.map(|_| ())
             }

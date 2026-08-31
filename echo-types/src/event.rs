@@ -13,5 +13,7 @@ pub enum SystemEvent {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Event {
     SendMessage(Message),
+    EditMessage(SnowflakeID, Message),
+    DeleteMessage(SnowflakeID),
     System(SystemEvent)
 }

@@ -5,7 +5,7 @@ use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
-use echo_server::{connection::Connection, error::RouteError, router::EchoRouter, runner::run, routes::CreateNewUserData};
+use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
 use echo_types::{PasswordProtected, Secret, User, UserSettings};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
 use vodozemac::olm::Account;
@@ -88,9 +88,9 @@ async fn main() -> Result<()> {
         .connect(into_socket_addr("localhost:4433"), "localhost")?
         .await?;
 
-    let mut conn = Connection::open_bi(&parent).await?;
+    let mut stream = Stream::open_bi(&parent).await?;
 
-    conn.send(&"users.create").await?;
+    stream.send(&"users.create").await?;
 
     let secret = Secret::random();
 
@@ -109,21 +109,21 @@ async fn main() -> Result<()> {
         olm_account: secret.encrypt(&olm_account.pickle())
     };
 
-    conn.send(&data).await?;
+    stream.send(&data).await?;
 
-    let maybe_user: std::result::Result<User, RouteError> = conn.receive().await?;
+    let maybe_user: std::result::Result<User, RouteError> = stream.receive().await?;
 
     let user = maybe_user?;
 
-    conn.close()?;
+    stream.close()?;
 
-    conn = Connection::open_bi(&parent).await?;
+    stream = Stream::open_bi(&parent).await?;
 
-    conn.send(&"users.get").await?;
+    stream.send(&"users.get").await?;
 
-    conn.send(&user.id).await?;
+    stream.send(&user.id).await?;
 
-    let maybe_user2: std::result::Result<User, RouteError> = conn.receive().await?;
+    let maybe_user2: std::result::Result<User, RouteError> = stream.receive().await?;
 
     let user2 = maybe_user2?;
 

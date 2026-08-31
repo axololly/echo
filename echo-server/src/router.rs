@@ -8,7 +8,7 @@ use echo_types::SnowflakeID;
 use rootcause::Result;
 use tokio::sync::Mutex;
 
-use crate::{auth::validate_user, connection::Connection, error::{RouteError, RouteResult}};
+use crate::{auth::validate_user, error::{RouteError, RouteResult}, stream::Stream};
 
 pub struct RateLimit {
     pub num_times: usize,
@@ -115,15 +115,10 @@ pub trait Route<Context>: Send + Sync + 'static {
     }
 }
 
-
-// use echo_server::{connection::Connection, error::RouteError, router::{RateLimiter, Route, Router}};
-// use echo_types::SnowflakeID;
-// use rootcause::Result;
-
 pub struct EchoContext {
     pub resource: String,
     pub pool: PgPool,
-    pub conn: Connection,
+    pub stream: Stream,
     pub user: Option<SnowflakeID>
 }
 
@@ -171,7 +166,7 @@ impl EchoRouter {
             },
 
             None => {
-                ctx.conn.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
+                ctx.stream.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
             }
         };
 

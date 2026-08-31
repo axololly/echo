@@ -27,7 +27,7 @@ use UserRouteError as U;
 #[route("users.get")]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
-        .conn
+        .stream
         .receive()
         .await
         .map_err(|_| E::InvalidData)?;
@@ -57,7 +57,7 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
 #[route("users.data.get")]
 pub async fn get_user_data(ctx: &mut EchoContext) -> RouteResult<UserData> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
-        .conn
+        .stream
         .receive()
         .await
         .map_err(|_| E::InvalidData)?;
@@ -74,7 +74,7 @@ pub async fn get_user_data(ctx: &mut EchoContext) -> RouteResult<UserData> {
 #[route("users.crypto.get")]
 pub async fn get_user_crypto(ctx: &mut EchoContext) -> RouteResult<UserCrypto> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
-        .conn
+        .stream
         .receive()
         .await
         .map_err(|_| E::InvalidData)?;
@@ -107,7 +107,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         signature_verifier,
         olm_account
     } = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -223,7 +223,7 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()>
         recipient, // TODO: check if they're blocked
         one_time_key
     } = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -267,7 +267,7 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()>
 #[route("users.friends.requests.accept")]
 pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     let sender: SnowflakeID = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
@@ -305,7 +305,7 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 #[route("users.reset-password")]
 pub async fn reset_user_password(ctx: &mut EchoContext) -> RouteResult<()> {
     let new_secret: PasswordProtected<Secret> = ctx
-        .conn
+        .stream
         .receive()
         .await
         .context(E::InvalidData)?;
