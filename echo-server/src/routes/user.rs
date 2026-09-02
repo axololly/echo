@@ -41,9 +41,7 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
             activity,
             about_me,
             status,
-            encrypted_secret,
-            encrypted_state,
-            signature_verifier
+            secret
         FROM users
         WHERE id = $1
     ";
@@ -64,7 +62,7 @@ pub async fn get_user_data(ctx: &mut EchoContext) -> RouteResult<UserData> {
 
     let user_data: UserData = fetch_opt_as!(
         &ctx.pool,
-        "SELECT olm_account, settings FROM users WHERE id = $1",
+        "SELECT settings FROM users_data WHERE id = $1",
         user_id
     ).context(E::User(U::UserNotFound))?;
 
@@ -81,7 +79,7 @@ pub async fn get_user_crypto(ctx: &mut EchoContext) -> RouteResult<UserCrypto> {
 
     let user_crypto: UserCrypto = fetch_opt_as!(
         &ctx.pool,
-        "SELECT signature_verifier FROM users WHERE id = $1",
+        "SELECT olm_account, signature_verifier FROM users_crypto WHERE id = $1",
         user_id
     ).context(E::User(U::UserNotFound))?;
 
@@ -94,6 +92,7 @@ pub struct CreateNewUserData {
     pub secret: PasswordProtected<Secret>,
     pub settings: Encrypted<UserSettings>,
     pub signature_verifier: SignatureVerifier,
+    pub encryption_public_key: crypto_box::PublicKey,
     pub olm_account: Encrypted<AccountPickle>
 }
 
@@ -105,6 +104,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         secret,
         settings,
         signature_verifier,
+        encryption_public_key,
         olm_account
     } = ctx
         .stream
@@ -169,16 +169,26 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO users_data (user_id, olm_account, settings) VALUES ($1, $2, $3)",
+        "INSERT INTO users_data (user_id, settings) VALUES ($1, $2)",
         &user.id,
-        &olm_account,
         &settings
     );
 
+    let stmt = "
+        INSERT INTO users_crypto (
+            user_id,
+            olm_account,
+            encryption_public_key,
+            signature_verifier
+        ) VALUES ($1, $2, $3, $4)
+    ";
+
     execute!(
         &mut *tx,
-        "INSERT INTO users_crypto (user_id, signature_verifier) VALUES ($1, $2)",
+        stmt,
         &user.id,
+        &olm_account,
+        encryption_public_key.to_bytes(),
         &signature_verifier
     );
 
@@ -190,9 +200,11 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 #[route("users.friends.get")]
 pub async fn get_friends(ctx: &mut EchoContext) -> RouteResult<Vec<SnowflakeID>> {
     let stmt = "
-        SELECT user1 AS id WHERE user2 = $1
+        SELECT user1 AS id FROM friendships
+        WHERE user2 = $1
         UNION ALL
-        SELECT user2 AS id WHERE user1 = $1
+        SELECT user2 AS id FROM friendships
+        WHERE user1 = $1
     ";
 
     let friends: Vec<SnowflakeID> = fetch_all_scalar!(&ctx.pool, stmt, ctx.user.unwrap());
@@ -218,7 +230,7 @@ pub struct CreateNewFriendRequestData {
 }
 
 #[route("users.friends.requests.create")]
-pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<FriendRequest> {
     let CreateNewFriendRequestData {
         recipient, // TODO: check if they're blocked
         one_time_key
@@ -230,7 +242,7 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()>
 
     let sender = ctx.user.unwrap();
 
-    let maybe_already_friends: Option<i8> = fetch_opt_scalar!(
+    let maybe_already_friends: Option<i32> = fetch_opt_scalar!(
         &ctx.pool,
         "SELECT 1 FROM friendships WHERE user1 = $1 AND user2 = $2",
         sender.min(recipient),
@@ -241,9 +253,9 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()>
         bail!(E::User(U::AlreadyFriends));
     }
 
-    let maybe_already_sent: Option<i8> = fetch_opt_scalar!(
+    let maybe_already_sent: Option<i32> = fetch_opt_scalar!(
         &ctx.pool,
-        "SELECT 1 FROM friend_requests WHERE sender = $1 AND recipient = $2",
+        "SELECT 1 FROM friend_requests WHERE sender = $1 AND receiver = $2",
         sender,
         recipient
     );
@@ -261,7 +273,13 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<()>
         Utc::now()
     );
 
-    Ok(())
+    let friend_request = FriendRequest {
+        sender,
+        one_time_key,
+        sent_at: Utc::now()
+    };
+
+    Ok(friend_request)
 }
 
 #[route("users.friends.requests.accept")]
@@ -282,14 +300,14 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "DELETE FROM friend_requests WHERE sender = $1 AND recipient = $2",
+        "DELETE FROM friend_requests WHERE sender = $1 AND receiver = $2",
         sender,
         recipient
     );
 
     execute!(
         &mut *tx,
-        "INSERT INTO friends (user1, user2, friends_since) VALUES ($1, $2, $3)",
+        "INSERT INTO friendships (user1, user2, friends_since) VALUES ($1, $2, $3)",
         sender.min(recipient),
         sender.max(recipient),
         Utc::now()
@@ -297,12 +315,14 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     tx.commit().await.context(E::Database)?;
 
+    println!("[ added friendship ]");
+
     // TODO: start a conversation here
 
     Ok(())
 }
 
-#[route("users.reset-password")]
+#[route("users.password.reset")]
 pub async fn reset_user_password(ctx: &mut EchoContext) -> RouteResult<()> {
     let new_secret: PasswordProtected<Secret> = ctx
         .stream

@@ -8,7 +8,7 @@ use echo_types::SnowflakeID;
 use rootcause::Result;
 use tokio::sync::Mutex;
 
-use crate::{auth::validate_user, error::{RouteError, RouteResult}, stream::Stream};
+use crate::{auth::validate_user, error::{RouteError, RouteResult}, ok, stream::Stream};
 
 pub struct RateLimit {
     pub num_times: usize,
@@ -127,6 +127,14 @@ pub struct EchoRouter {
     ratelimiter: RateLimiter
 }
 
+macro_rules! register {
+    ($router:ident, $($route:expr)+) => {
+        $(
+            $router.register_route($route).await;
+        )+
+    };
+}
+
 impl EchoRouter {
     pub async fn new() -> Self {
         let mut router = Self {
@@ -136,21 +144,36 @@ impl EchoRouter {
 
         use crate::routes::*;
 
-        // Group routes
-        router.register_route(create_new_group).await;
-        router.register_route(get_group).await;
-        router.register_route(join_new_group).await;
-        router.register_route(leave_group).await;
+        register! {
+            router,
 
-        // User routes
-        router.register_route(create_new_user).await;
-        router.register_route(get_user).await;
-        router.register_route(get_user_crypto).await;
-        router.register_route(get_user_data).await;
-        router.register_route(get_friends).await;
-        router.register_route(get_friend_requests).await;
-        router.register_route(create_new_friend_request).await;
-        router.register_route(accept_friend_request).await;
+            // Group routes
+            create_new_group
+            get_group
+            join_new_group
+            leave_group
+            get_group_invite_code
+            kick_group_member
+            ban_group_member
+            unban_group_member
+            edit_group_metadata
+            send_new_group_message
+            ensure_latest_megolm_session
+
+            // User routes
+            create_new_user
+            get_user
+            get_user_crypto
+            get_user_data
+            get_friends
+            get_friend_requests
+            create_new_friend_request
+            accept_friend_request
+            reset_user_password
+
+            // Conversation routes
+            manage_user_inbox
+        };
 
         router
     }
@@ -158,6 +181,8 @@ impl EchoRouter {
     pub async fn run_with(&self, mut ctx: EchoContext) -> Result<()> {
         match self.routes.get(ctx.resource.as_str()) {
             Some(route) => {
+                ctx.stream.send(&ok!(())).await?;
+
                 if route.needs_authentication() {
                     ctx.user = Some(validate_user(&mut ctx).await?);
                 }
@@ -169,6 +194,8 @@ impl EchoRouter {
                 ctx.stream.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
             }
         };
+
+        // ctx.stream.close()?;
 
         Ok(())
     }

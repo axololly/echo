@@ -16,6 +16,9 @@ pub enum RouteError {
     #[error("user failed to authenticate themselves")]
     UserAuthFailed,
 
+    #[error("transport error")]
+    Transport,
+
     #[error("ratelimit reached")]
     RatelimitReached,
 

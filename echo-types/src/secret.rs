@@ -1,10 +1,8 @@
-use std::{fmt::Debug, marker::PhantomData, ops::Deref, result::Result as StdResult};
+use std::{array::TryFromSliceError, fmt::Debug, marker::PhantomData, ops::Deref, result::Result as StdResult};
 
 use argon2::Argon2;
-use chacha20poly1305::{
-    Key, KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Generate},
-};
+use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::{Aead as _, Generate as _}};
+use crypto_box::{aead::Aead as _, ChaChaBox};
 use hkdf::Hkdf;
 use rootcause::{Result, prelude::ResultExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -60,10 +58,44 @@ impl Secret {
     }
 
     /// Verify some data was made from this [`Secret`].
-    pub fn verify<T: Serialize>(&self, value: &T, signature: &Signed<T>) -> bool {
-        let signing_secret = self.derive_new("signing");
+    pub fn verify<T: Serialize>(&self, signature: &Signed<T>) -> bool {
+        signature.verify((*self).into())
+    }
 
-        signature.verify(value, signing_secret.into())
+    /// Make a [`CryptoBox`] that can only be opened by whoever
+    /// has the secret key corresponding to this public key.
+    pub fn box_for<T>(
+        &self,
+        value: &T,
+        public_key: crypto_box::PublicKey
+    ) -> CryptoBox<T>
+    where
+        T: Serialize + DeserializeOwned
+    {
+        CryptoBox::new(value, *self, public_key)
+    }
+
+    /// Open a [`CryptoBox`] that was sent by whoever has the given public key.
+    pub fn unbox_from<T>(
+        &self,
+        crypto_box: &CryptoBox<T>,
+        public_key: crypto_box::PublicKey
+    ) -> DecryptionResult<T>
+    where
+        T: Serialize + DeserializeOwned
+    {
+        crypto_box.unbox(*self, public_key)
+    }
+
+    /// Try to convert a byte slice into a [`Secret`].
+    pub fn try_from_bytes(bytes: &[u8]) -> std::result::Result<Self, TryFromSliceError> {
+        <[u8; 32]>::try_from(bytes).map(Self)
+    }
+}
+
+impl AsRef<[u8]> for Secret {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -84,6 +116,18 @@ impl From<Secret> for EncryptionKey {
     }
 }
 
+impl From<Secret> for crypto_box::SecretKey {
+    fn from(value: Secret) -> Self {
+        crypto_box::SecretKey::from_bytes(value.0)
+    }
+}
+
+impl From<Secret> for crypto_box::PublicKey {
+    fn from(value: Secret) -> Self {
+        crypto_box::SecretKey::from_bytes(value.0).public_key()
+    }
+}
+
 impl From<Secret> for SignatureVerifier {
     fn from(value: Secret) -> Self {
         let key = SigningKey::from_slice(&value.0)
@@ -100,6 +144,30 @@ pub struct Encrypted<T> {
     payload: Vec<u8>,
     nonce: [u8; NONCE_SIZE],
     _data: PhantomData<T>,
+}
+
+impl<T> Encrypted<T> {
+    /// Change the marker type of this [`Encrypted`] struct.
+    ///
+    /// # Safety
+    /// This is just changing the type that would be returned
+    /// from decrypting this struct.
+    ///
+    /// Unless `T` and `U` deserialise identically, the
+    /// deserialisation part will just fail.
+    pub unsafe fn cast<U>(self) -> Encrypted<U> {
+        let Encrypted {
+            payload,
+            nonce,
+            ..
+        } = self;
+
+        Encrypted {
+            payload,
+            nonce,
+            _data: PhantomData
+        }
+    }
 }
 
 impl<T> PartialEq for Encrypted<T> {
@@ -251,10 +319,24 @@ impl<T: Serialize + DeserializeOwned> PasswordProtected<T> {
 
         Self { enc, salt }
     }
+
+    pub fn unlock(&self, password: &str) -> DecryptionResult<T> {
+        let argon2 = construct_argon2();
+
+        let mut key = [0; ARGON2_OUT_SIZE];
+
+        argon2
+            .hash_password_into(password.as_bytes(), &self.salt, &mut key)
+            .expect("failed to hash with argon2");
+
+        self.enc.decrypt(key)
+    }
 }
 
 impl<T: DeserializeOwned> Decode<'_, sqlx::Postgres> for PasswordProtected<T> {
-    fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>) -> StdResult<Self, sqlx::error::BoxDynError> {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> StdResult<Self, sqlx::error::BoxDynError> {
         let obj = bitcode::deserialize(value.as_bytes()?)?;
 
         Ok(obj)
@@ -324,7 +406,6 @@ impl sqlx::Type<sqlx::Postgres> for SignatureVerifier {
 pub struct Signed<T> {
     value: T,
     raw: P256Signature,
-    author: VerifyingKey,
     _data: PhantomData<T>
 }
 
@@ -340,13 +421,12 @@ impl<T: Serialize> Signed<T> {
         Self {
             value,
             raw,
-            author: *key.verifying_key(),
             _data: PhantomData
         }
     }
 
-    pub fn verify(&self, value: &T, verifier: SignatureVerifier) -> bool {
-        let bytes = bitcode::serialize(&value)
+    pub fn verify(&self, verifier: SignatureVerifier) -> bool {
+        let bytes = bitcode::serialize(&self.value)
             .expect("failed to serialise with bitcode");
 
         verifier.0.verify(&bytes, &self.raw).is_ok()
@@ -373,3 +453,84 @@ impl<T> Deref for Signed<T> {
         &self.value
     }
 }
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CryptoBox<T> {
+    payload: Vec<u8>,
+    nonce: [u8; 24],
+    _data: PhantomData<T>
+}
+
+impl<T: Serialize> CryptoBox<T> {
+    pub fn new(value: &T, secret: Secret, public_key: crypto_box::PublicKey) -> Self {
+        let bytes = bitcode::serialize(&value).expect("failed to serialise");
+
+        let inner = ChaChaBox::new(&public_key, &secret.into());
+
+        let nonce = rand::random::<[u8; 24]>();
+
+        let payload = inner
+            .encrypt(crypto_box::Nonce::from_slice(&nonce), &*bytes)
+            .expect("failed to encrypt");
+
+        Self {
+            payload,
+            nonce,
+            _data: PhantomData
+        }
+    }
+}
+
+impl<T: DeserializeOwned> CryptoBox<T> {
+    pub fn unbox(&self, secret: Secret, public_key: crypto_box::PublicKey) -> DecryptionResult<T> {
+        let inner = crypto_box::ChaChaBox::new(&public_key, &secret.into());
+
+        let bytes = inner
+            .decrypt(&self.nonce.into(), &*self.payload)
+            .context(DecryptionError::Decryption)?;
+
+        let obj = bitcode::deserialize(&bytes)
+            .context(DecryptionError::Deserialisation)?;
+
+        Ok(obj)
+    }
+}
+
+impl<T> Debug for CryptoBox<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CryptoBox").finish_non_exhaustive()
+    }
+}
+
+impl<T> sqlx::Encode<'_, sqlx::Postgres> for CryptoBox<T> {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+    ) -> StdResult<IsNull, sqlx::error::BoxDynError> {
+        let bytes = bitcode::serialize(self)?;
+
+        buf.extend_from_slice(&bytes);
+
+        Ok(IsNull::No)
+    }
+}
+
+impl<T> sqlx::Decode<'_, sqlx::Postgres> for CryptoBox<T> {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> StdResult<Self, sqlx::error::BoxDynError> {
+        let bytes = value.as_bytes()?;
+
+        let obj = bitcode::deserialize(bytes)?;
+
+        Ok(obj)
+    }
+}
+
+impl<T> sqlx::Type<sqlx::Postgres> for CryptoBox<T> {
+    fn type_info() -> <sqlx::Postgres as sqlx::Database>::TypeInfo {
+        <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+}
+
+// TODO: add a master secret type that can derive its own keys for different functions

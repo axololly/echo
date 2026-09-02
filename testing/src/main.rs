@@ -1,14 +1,67 @@
-use std::{net::ToSocketAddrs, str::FromStr, sync::Arc};
+use std::{collections::HashMap, net::ToSocketAddrs, str::FromStr, sync::Arc};
 
+use crypto_box::PublicKey;
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
-use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
-use echo_types::{PasswordProtected, Secret, User, UserSettings};
+use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateNewFriendRequestData, CreateNewGroupData, CreateNewUserData, EncryptedMegolmSession, SendGroupMessageData}, runner::run, stream::Stream};
+use echo_types::{CryptoBox, Encrypted, Group, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
-use vodozemac::olm::Account;
+use vodozemac::{megolm::{GroupSession, InboundGroupSession, MegolmMessage, SessionConfig as MegolmConfig, SessionKey}, olm::Account};
+
+async fn access_resource<T>(
+    parent: &quinn::Connection,
+    route: &str,
+    mut f: impl AsyncFnMut(&mut Stream) -> Result<T>
+) -> Result<T> {
+    println!("-- trying to access resource {route:?} --");
+
+    let mut stream = Stream::open_bi(parent).await?;
+
+    stream.send(&route).await?;
+
+    stream.receive::<RouteResult<()>>().await??;
+
+    let result = f(&mut stream).await;
+
+    // stream.close()?;
+
+    result
+}
+
+type RouteResult<T> = std::result::Result<T, RouteError>;
+
+async fn create_account(parent: &quinn::Connection, username: &str) -> Result<(User, Account)> {
+    access_resource(parent, "users.create", async |stream| {
+        let secret = Secret::random();
+
+        let olm_account = Account::new(); // TODO: use this to test out messaging
+
+        let data = CreateNewUserData {
+            username: username.to_string(),
+            secret: PasswordProtected::new(&secret, "6767"),
+            settings: secret.encrypt(&UserSettings {
+                cache_secret_for: 0,
+                logout_after: 0,
+                enable_read_receipts: true,
+                enable_typing_indicators: true
+            }),
+            signature_verifier: secret.into(),
+            olm_account: secret.encrypt(&olm_account.pickle()),
+            encryption_public_key: secret.into()
+        };
+
+        stream.send(&data).await?;
+
+        let user: User = stream.receive::<RouteResult<_>>().await??;
+
+        println!("ID of user {:?} is {}", user.name, user.id);
+
+        Ok((user, olm_account))
+    }).await
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,46 +141,158 @@ async fn main() -> Result<()> {
         .connect(into_socket_addr("localhost:4433"), "localhost")?
         .await?;
 
-    let mut stream = Stream::open_bi(&parent).await?;
+    let (alice, mut alice_olm) = create_account(&parent, "alice").await?;
+    let (bob, _) = create_account(&parent, "bob").await?;
 
-    stream.send(&"users.create").await?;
+    let alice_secret = alice.secret.unlock("6767")?;
+    let alice_signed_id = alice_secret.sign(alice.id);
 
-    let secret = Secret::random();
+    let bob_secret = bob.secret.unlock("6767")?;
+    let bob_signed_id = bob_secret.sign(bob.id);
 
-    let olm_account = Account::new(); // TODO: use this to test out messaging
+    access_resource(&parent, "users.friends.requests.create", async |stream| {
+        stream.send(&alice_signed_id).await?;
 
-    let data = CreateNewUserData {
-        username: "axo".to_string(),
-        secret: PasswordProtected::new(&secret, "6767"),
-        settings: secret.encrypt(&UserSettings {
-            cache_secret_for: 0,
-            logout_after: 0,
-            enable_read_receipts: true,
-            enable_typing_indicators: true
-        }),
-        signature_verifier: secret.into(),
-        olm_account: secret.encrypt(&olm_account.pickle())
-    };
+        alice_olm.generate_one_time_keys(1);
 
-    stream.send(&data).await?;
+        let one_time_key = *alice_olm.one_time_keys().values().next().unwrap();
 
-    let maybe_user: std::result::Result<User, RouteError> = stream.receive().await?;
+        alice_olm.mark_keys_as_published();
 
-    let user = maybe_user?;
+        stream.send(&CreateNewFriendRequestData {
+            recipient: bob.id,
+            one_time_key: one_time_key.into()
+        }).await?;
 
-    stream.close()?;
+        Ok(())
+    }).await?;
 
-    stream = Stream::open_bi(&parent).await?;
+    access_resource(&parent, "users.friends.requests.accept", async |stream| {
+        stream.send(&bob_signed_id).await?;
 
-    stream.send(&"users.get").await?;
+        stream.send(&alice.id).await?;
 
-    stream.send(&user.id).await?;
+        Ok(())
+    }).await?;
 
-    let maybe_user2: std::result::Result<User, RouteError> = stream.receive().await?;
+    let group_id = access_resource(&parent, "groups.create", async |stream| {
+        stream.send(&alice_signed_id).await?;
 
-    let user2 = maybe_user2?;
+        stream.send(&CreateNewGroupData {
+            name: "very cool group chat".to_string(),
+            initial_members: vec![bob.id]
+        }).await?;
 
-    println!("{}", user == user2);
+        let group: Group = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(group.id)
+    }).await?;
+
+    println!("group ID: {group_id}");
+
+    let mut group_session = access_resource(&parent, "groups.sessions.ensure", async |stream| {
+        stream.send(&alice_signed_id).await?;
+
+        stream.send(&group_id).await?;
+
+        let needs_uploading: bool = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(needs_uploading);
+
+        let keys: HashMap<SnowflakeID, PublicKey> = stream.receive::<RouteResult<_>>().await??;
+
+        let group_session = GroupSession::new(MegolmConfig::version_1());
+
+        let session_key = group_session.session_key();
+
+        let inbounds = keys
+            .into_iter()
+            .map(|(id, key)| (id, alice_secret.box_for(&session_key, key)))
+            .collect();
+
+        let upload_data = EncryptedMegolmSession {
+            outbound: alice_secret.encrypt(&group_session.pickle()),
+            inbounds
+        };
+
+        stream.send(&upload_data).await?;
+
+        Ok(group_session)
+    }).await?;
+
+    let message = access_resource(&parent, "groups.messages.send", async |stream| {
+        stream.send(&alice_signed_id).await?;
+
+        let message_secret = Secret::random();
+
+        let message_body = message_secret.encrypt(&MessageBody {
+            content: "hello bob".to_string()
+        });
+
+        let message_key = group_session.encrypt(message_secret);
+
+        stream.send(&SendGroupMessageData {
+            group_id,
+            replied_to: None,
+            message_body,
+            message_key
+        }).await?;
+
+        let msg: Message = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(msg)
+    }).await?;
+
+    let message_keys = access_resource(&parent, "conversations.messages.inbox", async |stream| {
+        stream.send(&bob_signed_id).await?;
+
+        let mut message_keys = HashMap::new();
+
+        loop {
+            let mut map: HashMap<SnowflakeID, Encrypted<Secret>> = HashMap::new();
+
+            println!("trying to receive rows on client");
+
+            let rows: Vec<(SnowflakeID, CryptoBox<SessionKey>, MegolmMessage)> = stream.receive::<RouteResult<_>>().await?.unwrap();
+
+            println!("received rows on client");
+
+            if rows.is_empty() {
+                break;
+            }
+
+            for (message_id, session_key, key_message) in rows {
+                let session_key = bob_secret.unbox_from(&session_key, alice_secret.into())?;
+
+                let mut inbound = InboundGroupSession::new(
+                    &session_key,
+                    MegolmConfig::version_1()
+                );
+
+                let dec = inbound.decrypt(&key_message)?;
+
+                let message_key = Secret::try_from_bytes(&dec.plaintext)?;
+
+                message_keys.insert(message_id, message_key);
+
+                map.insert(message_id, alice_secret.encrypt(&message_key));
+
+                println!("converted a key!");
+            }
+
+            stream.send(&map).await?;
+        }
+
+        Ok(message_keys)
+    }).await?;
+
+    println!("done with everything on the client");
+
+    let message_key = message_keys[&message.id];
+
+    let body = message_key.decrypt(&message.body)?;
+
+    dbg!(body);
 
     Ok(())
 }

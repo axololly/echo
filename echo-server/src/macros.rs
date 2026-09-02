@@ -157,3 +157,10 @@ macro_rules! execute {
             .context($crate::error::RouteError::Database)?
     }};
 }
+
+#[macro_export]
+macro_rules! ok {
+    ($value:expr) => {{
+        Ok::<_, ()>($value)
+    }};
+}

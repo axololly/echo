@@ -1,4 +1,4 @@
-use std::{sync::{Arc, LazyLock, Mutex, atomic::{AtomicU64, Ordering}}};
+use std::{fmt::Display, sync::{Arc, LazyLock, Mutex, atomic::{AtomicU64, Ordering}}};
 
 use chrono::{DateTime, Utc};
 use ferroid::{define_snowflake_id, generator::{Poll, SnowflakeGenerator}, time::TimeSource};
@@ -14,6 +14,12 @@ define_snowflake_id!(
     machine_id: 10,
     sequence: 12
 );
+
+impl Display for SnowflakeID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.id)
+    }
+}
 
 impl Encode<'_, sqlx::Postgres> for SnowflakeID {
     fn encode_by_ref(

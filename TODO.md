@@ -2,3 +2,5 @@
 - add config file in TOML format
 - add abstraction over groups and direct messages called `Conversation` for sending messages
 - add logging
+- add uploading assets
+- change all `.send` calls to be `Ok(x)` instead of just `x`

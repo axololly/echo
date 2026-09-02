@@ -1,8 +1,8 @@
 CREATE TYPE "Activity" AS ENUM(
-    'Online',
-    'Idle',
-    'DoNotDisturb',
-    'Offline'
+'Online',
+'Idle',
+'DoNotDisturb',
+'Offline'
 );
 
 CREATE DOMAIN "AssetID" AS TEXT CHECK (length(VALUE) = 64);
@@ -23,8 +23,7 @@ CREATE TABLE users_data (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    olm_account BYTEA,
-    settings BYTEA
+    settings BYTEA NOT NULL
 );
 
 CREATE TABLE users_crypto (
@@ -32,7 +31,12 @@ CREATE TABLE users_crypto (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    signature_verifier BYTEA CHECK (length(signature_verifier) = 32)
+    olm_account BYTEA NOT NULL,
+
+    encryption_public_key BYTEA NOT NULL
+        CHECK (length(encryption_public_key) = 32),
+
+    signature_verifier BYTEA NOT NULL
 );
 
 CREATE TABLE friendships (
@@ -92,7 +96,21 @@ CREATE TABLE group_members (
     PRIMARY KEY (group_id, user_id)
 );
 
-CREATE INDEX idx_group_member_ids ON group_members(user_id);
+CREATE INDEX idx_conversation_member_ids ON conversation_members(user_id);
+
+CREATE TABLE groups (
+    id INT8 PRIMARY KEY
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    name TEXT NOT NULL
+        CHECK (char_length(name) BETWEEN 1 AND 20),
+
+    avatar "AssetID",
+
+    invite_code TEXT NOT NULL CHECK (invite_code ~ '[0-9A-F]+')
+);
 
 CREATE TABLE group_banned_members (
     group_id INT8 REFERENCES groups(id)
@@ -105,3 +123,146 @@ CREATE TABLE group_banned_members (
 
     PRIMARY KEY (group_id, user_id)
 );
+
+CREATE INDEX idx_group_banned_member_ids ON group_banned_members(user_id);
+
+CREATE TYPE "MessageType" AS ENUM(
+    'Normal',
+    'Reply',
+    'Edit'
+);
+
+CREATE TABLE messages (
+    id INT8 PRIMARY KEY,
+
+    parent_id INT8
+        REFERENCES messages(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    author_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    type "MessageType" NOT NULL,
+
+    sent_at TIMESTAMP NOT NULL,
+
+    blob BYTEA NOT NULL
+);
+
+CREATE INDEX idx_messages_conversation_id ON messages(conversation_id, id);
+CREATE INDEX idx_messages_author_id ON messages(author_id);
+
+-- TODO: make this work too
+-- CREATE TABLE asset_decryption_keys (
+--     user_id INT8 NOT NULL
+--         REFERENCES users(id)
+--         ON UPDATE CASCADE
+--         ON DELETE CASCADE,
+--
+--     asset_id "AssetID",
+--
+--     asset_key BYTEA NOT NULL,
+--
+--     PRIMARY KEY (user_id, asset_id)
+-- );
+
+-- Each user stores the key that decrypts the message
+-- encrypted under their own master secret.
+CREATE TABLE message_decryption_keys (
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    message_id INT8 NOT NULL
+        REFERENCES messages(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    blob BYTEA NOT NULL,
+
+    PRIMARY KEY (user_id, message_id)
+);
+
+CREATE INDEX idx_message_decryption_keys_id ON message_decryption_keys(message_id);
+
+-- CREATE TABLE asset_decryption_keys (
+--     user_id INT8 NOT NULL
+--         REFERENCES users(id)
+--         ON UPDATE CASCADE
+--         ON DELETE CASCADE,
+
+--     asset_id "AssetID",
+
+--     asset_key BYTEA NOT NULL,
+
+--     PRIMARY KEY (user_id, asset_id)
+-- );
+
+-- These are Olm/Megolm messages containing decryption keys
+-- that need to be added to the 'message_decryption_keys' table.
+CREATE TABLE outgoing_message_keys (
+    recipient_id INT8 NOT NULL,
+    epoch INT8 NOT NULL CHECK (epoch >= 0),
+
+    message_id INT8 NOT NULL
+        REFERENCES messages(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    blob BYTEA NOT NULL,
+
+    PRIMARY KEY (recipient_id, epoch, message_id)
+);
+
+CREATE INDEX idx_outgoing_messages_id ON outgoing_message_keys(message_id);
+
+CREATE TABLE session_keys (
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    keys BYTEA NOT NULL,
+
+    PRIMARY KEY (conversation_id, user_id)
+);
+
+    -- These are Megolm session keys used for transporting the message keys.
+CREATE TABLE group_session_keys (
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    epoch INT8 NOT NULL CHECK (epoch >= 0),
+
+    sender_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    recipient_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    blob BYTEA NOT NULL,
+
+    PRIMARY KEY (group_id, epoch, sender_id, recipient_id)
+);
+
+CREATE INDEX idx_group_session_keys_recipient ON group_session_keys(recipient_id, group_id, epoch);

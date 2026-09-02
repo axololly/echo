@@ -1,7 +1,9 @@
 use quinn::VarInt;
-use rootcause::Result;
+use rootcause::{Result, prelude::ResultExt};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::error::{RouteError, RouteResult};
 
 pub struct Stream {
     sender: quinn::SendStream,
@@ -21,23 +23,37 @@ impl Stream {
         Ok(Self { sender, receiver })
     }
 
-    pub async fn send<T: Serialize>(&mut self, data: &T) -> Result<()> {
-        let bytes = bitcode::serialize(data)?;
 
-        self.sender.write_u64(bytes.len() as u64).await?;
-        self.sender.write_all(&bytes).await?;
+    pub async fn send<T: Serialize>(&mut self, data: &T) -> RouteResult<()> {
+        let mut f = async || -> Result<()> {
+            let bytes = bitcode::serialize(data)?;
 
-        Ok(())
+            self.sender.write_u64(bytes.len() as u64).await?;
+            self.sender.write_all(&bytes).await?;
+
+            Ok(())
+        };
+
+        f().await.context(RouteError::Transport)
     }
 
-    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T> {
-        let len = self.receiver.read_u64().await?;
+    pub async fn receive<T: DeserializeOwned>(&mut self) -> RouteResult<T> {
+        let len = self
+             .receiver
+             .read_u64()
+             .await
+            .context(RouteError::Transport)
+            .attach("while receiving length")?;
 
         let mut bytes = vec![0u8; len as usize];
 
-        self.receiver.read_exact(&mut bytes).await?;
+        self.receiver
+            .read_exact(&mut bytes)
+            .await
+            .context(RouteError::Transport)
+            .attach("while receiving actual data")?;
 
-        let value = bitcode::deserialize(&bytes)?;
+        let value = bitcode::deserialize(&bytes).context(RouteError::InvalidData)?;
 
         Ok(value)
     }

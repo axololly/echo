@@ -41,17 +41,24 @@ pub struct User {
 
 #[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
 pub struct UserData {
-    pub olm_account: Encrypted<AccountPickle>,
     pub settings: Encrypted<UserSettings>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
 pub struct UserCrypto {
+    pub olm_account: Encrypted<AccountPickle>,
+    // TODO: add public key field
     pub signature_verifier: SignatureVerifier
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OneTimeKey(Curve25519PublicKey);
+
+impl From<Curve25519PublicKey> for OneTimeKey {
+    fn from(value: Curve25519PublicKey) -> Self {
+        Self(value)
+    }
+}
 
 impl sqlx::Decode<'_, sqlx::Postgres> for OneTimeKey {
     fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {

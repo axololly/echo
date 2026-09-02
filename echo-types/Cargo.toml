@@ -10,6 +10,7 @@ bitcode = { version = "0.6.9", features = ["serde"] }
 blake3 = "1.8.6"
 chacha20poly1305 = "0.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
+crypto_box = { version = "0.9", features = ["chacha20", "serde", "std"] }
 ferroid = { version = "2.0.0", features = ["std", "snowflake"] }
 hex = "0.4.3"
 hkdf = { version = "0.13.0", features = ["kdf"] }

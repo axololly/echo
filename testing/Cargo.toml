@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crypto_box = { version = "0.9.1", features = ["chacha20", "serde", "std"] }
 echo-server = { path = "../echo-server" }
 echo-types = { path = "../echo-types" }
 pgtemp = "0.7.1"

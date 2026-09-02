@@ -1,4 +1,4 @@
-use std::{net::ToSocketAddrs, sync::Arc};
+use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 
 use rootcause::{Result, option_ext::OptionExt};
 use sqlx::postgres::PgPool;
@@ -28,6 +28,8 @@ pub async fn run(
     let transport = Arc::get_mut(&mut config.transport).unwrap();
 
     transport.max_idle_timeout(Some(VarInt::from_u32(30_000).into()));
+
+    transport.keep_alive_interval(Some(Duration::from_secs(25)));
 
     let local_addr = local_addr
         .to_socket_addrs()?
@@ -67,6 +69,8 @@ async fn handle_incoming_requests(
 
         let resource: String = stream.receive().await?;
 
+        println!("accessing resource {resource:?}");
+
         let ctx = EchoContext {
             resource,
             stream,
@@ -74,6 +78,8 @@ async fn handle_incoming_requests(
             user: None
         };
 
-        router.run_with(ctx).await?;
+        if let Err(report) = router.run_with(ctx).await {
+            println!("\nServer error:\n{report:?}");
+        }
     }
 }

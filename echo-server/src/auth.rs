@@ -14,13 +14,21 @@ pub async fn validate_user(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
 
     let id = signed_id.value();
 
-    let verifier: SignatureVerifier = fetch_one_scalar!(
+    let name: String = fetch_one_scalar!(
         &ctx.pool,
-        "SELECT signature_verifier FROM users WHERE id = ?",
+        "SELECT name FROM users WHERE id = $1",
         id
     );
 
-    if !signed_id.verify(id, verifier) {
+    println!("[ authenticating as: {name} ]");
+
+    let verifier: SignatureVerifier = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT signature_verifier FROM users_crypto WHERE user_id = $1",
+        id
+    );
+
+    if !signed_id.verify(verifier) {
         bail!(E::UserAuthFailed);
     }
 
