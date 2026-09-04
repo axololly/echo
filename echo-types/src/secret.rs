@@ -36,7 +36,7 @@ impl Secret {
     where
         T: Serialize + DeserializeOwned
     {
-        Encrypted::encrypt_with_key(value, self.derive_new("encryption").0)
+        Encrypted::encrypt_with_key(value, self.0)
     }
 
     /// Decrypt some [`Encrypted`] data using this [`Secret`] as a key.
@@ -44,17 +44,12 @@ impl Secret {
     where
         T: Serialize + DeserializeOwned
     {
-        enc.decrypt(self.derive_new("encryption").0)
+        enc.decrypt(self.0)
     }
 
     /// Sign some data using this [`Secret`].
     pub fn sign<T: Serialize>(&self, value: T) -> Signed<T> {
-        let signature_secret = self.derive_new("signing");
-
-        let key = SigningKey::from_slice(&signature_secret.0)
-            .expect("failed to create signing key");
-
-        Signed::new(value, key)
+        Signed::new(value, (*self).into())
     }
 
     /// Verify some data was made from this [`Secret`].
@@ -125,6 +120,13 @@ impl From<Secret> for crypto_box::SecretKey {
 impl From<Secret> for crypto_box::PublicKey {
     fn from(value: Secret) -> Self {
         crypto_box::SecretKey::from_bytes(value.0).public_key()
+    }
+}
+
+impl From<Secret> for SigningKey {
+    fn from(value: Secret) -> Self {
+        SigningKey::from_slice(&value.0)
+            .expect("failed to convert secret to signing key")
     }
 }
 
@@ -405,8 +407,7 @@ impl sqlx::Type<sqlx::Postgres> for SignatureVerifier {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Signed<T> {
     value: T,
-    raw: P256Signature,
-    _data: PhantomData<T>
+    raw: P256Signature
 }
 
 impl<T: Copy> Copy for Signed<T> {}
@@ -420,8 +421,7 @@ impl<T: Serialize> Signed<T> {
 
         Self {
             value,
-            raw,
-            _data: PhantomData
+            raw
         }
     }
 

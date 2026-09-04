@@ -20,7 +20,7 @@ pub async fn validate_user(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
         id
     );
 
-    println!("[ authenticating as: {name} ]");
+    println!("[ authenticating as: {name} (resource: {:?}) ]", ctx.resource);
 
     let verifier: SignatureVerifier = fetch_one_scalar!(
         &ctx.pool,

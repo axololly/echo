@@ -8,7 +8,7 @@ use thiserror::Error;
 use vodozemac::megolm::{GroupSessionPickle, MegolmMessage, SessionKey};
 
 use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_all_scalar, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, route};
-use echo_types::{AssetID, CryptoBox, DEFAULT_PFP_ASSET_ID, Encrypted, Group, GroupMember, Message, MessageBody, MessageType, SNOWFLAKE_GEN, SnowflakeID};
+use echo_types::{AssetID, CryptoBox, DEFAULT_PFP_ASSET_ID, Encrypted, Group, GroupMember, Message, MessageBody, MessageType, SNOWFLAKE_GEN, Secret, SnowflakeID};
 
 use crate::router::EchoContext;
 
@@ -152,15 +152,15 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO groups (id, name, avatar, invite_code) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO groups (id, name, avatar, invite_code, current_epoch) VALUES ($1, $2, $3, $4, $5)",
         group_id,
         &name,
         &*DEFAULT_PFP_ASSET_ID,
-        &invite_code
+        &invite_code,
+        0
     );
 
     let owner_join_time = Utc::now();
-    let other_join_time = owner_join_time + TimeDelta::seconds(1);
 
     execute!(
         &mut *tx,
@@ -170,13 +170,13 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         owner_join_time
     );
 
-    for other_user in &initial_members {
+    for (offset, other_user) in initial_members.iter().enumerate() {
         execute!(
             &mut *tx,
             "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
             group_id,
             other_user,
-            other_join_time
+            owner_join_time + TimeDelta::milliseconds((offset + 1) as i64)
         );
     }
 
@@ -190,9 +190,10 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     members.extend(
         initial_members
             .into_iter()
-            .map(|user_id| GroupMember {
+            .enumerate()
+            .map(|(offset, user_id)| GroupMember {
                 user_id,
-                joined_at: other_join_time
+                joined_at: owner_join_time + TimeDelta::milliseconds((offset + 1) as i64)
             })
     );
 
@@ -242,7 +243,7 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &ctx.pool,
-        "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
+        "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
         group_id,
         user,
         now
@@ -262,8 +263,8 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         .context(E::InvalidData)?;
 
     let stmt = "
-        DELETE FROM group_members
-        WHERE group_id = $1
+        DELETE FROM conversation_members
+        WHERE conversation_id = $1
         AND user_id = $2
         RETURNING 1
     ";
@@ -291,8 +292,8 @@ pub async fn get_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String>
         SELECT invite_code FROM groups
         WHERE id = $1
         AND EXISTS(
-            SELECT 1 FROM group_members
-            WHERE group_id = $1
+            SELECT 1 FROM conversation_members
+            WHERE conversation_id = $1
             AND user_id = $2
         )
     ";
@@ -316,8 +317,8 @@ async fn get_group_owner(
     group_id: SnowflakeID
 ) -> RouteResult<SnowflakeID> {
     let stmt = "
-        SELECT user_id FROM group_members
-        WHERE group_id = $1
+        SELECT user_id FROM conversation_members
+        WHERE conversation_id = $1
         ORDER BY joined_at
         LIMIT 1
     ";
@@ -467,7 +468,7 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2",
+        "DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
         group_id,
         member_id
     );
@@ -525,9 +526,9 @@ pub async fn unban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EditGroupMetadataData {
-    group_id: SnowflakeID,
-    new_name: Option<String>,
-    new_avatar: Option<AssetID>
+    pub group_id: SnowflakeID,
+    pub new_name: Option<String>,
+    pub new_avatar: Option<AssetID>
 }
 
 #[route("groups.metadata.edit")]
@@ -581,7 +582,8 @@ pub struct SendGroupMessageData {
     pub group_id: SnowflakeID,
     pub replied_to: Option<SnowflakeID>,
     pub message_body: Encrypted<MessageBody>,
-    pub message_key: MegolmMessage
+    pub message_key_for_others: MegolmMessage,
+    pub message_key_for_self: Encrypted<Secret>
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -596,36 +598,30 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
 
     let group_id: SnowflakeID = ctx.stream.receive().await?;
 
-    let maybe_max_epoch: Option<i64> = fetch_one_scalar!(
+    let current_epoch: i64 = fetch_one_scalar!(
         &ctx.pool,
-        "SELECT MAX(epoch) FROM group_session_keys WHERE group_id = $1",
+        "SELECT current_epoch FROM groups WHERE id = $1",
         group_id
     );
 
-    let mut latest_keys: Vec<(SnowflakeID, Vec<u8>)> = vec![];
+    let stmt = "
+        SELECT recipient_id, blob FROM group_session_keys
+        WHERE group_id = $1
+        AND epoch = $2
+        AND sender_id = $3
+    ";
 
-    if let Some(max_epoch) = maybe_max_epoch {
-        let stmt = "
-            SELECT recipient_id, blob FROM group_session_keys
-            WHERE group_id = $1
-            AND epoch = $2
-            AND sender_id = $3
-        ";
-
-        latest_keys = fetch_all_as!(
-            &ctx.pool,
-            stmt,
-            group_id,
-            max_epoch,
-            user
-        );
-    }
+    let latest_keys: Vec<(SnowflakeID, Vec<u8>)> = fetch_all_as!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        current_epoch,
+        user
+    );
 
     let needs_uploading = latest_keys.is_empty();
 
     ctx.stream.send(&ok!(needs_uploading)).await?;
-
-    let max_epoch = maybe_max_epoch.unwrap_or(0);
 
     if needs_uploading {
         let mut tx = ctx
@@ -677,7 +673,7 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
             &mut *tx,
             stmt,
             group_id,
-            max_epoch,
+            current_epoch,
             user,
             user,
             outbound
@@ -688,7 +684,7 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
                 &mut *tx,
                 stmt,
                 group_id,
-                max_epoch,
+                current_epoch,
                 user,
                 recipient_id,
                 session_key
@@ -740,7 +736,8 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
         group_id,
         replied_to,
         message_body,
-        message_key
+        message_key_for_others,
+        message_key_for_self
     } = ctx
         .stream
         .receive()
@@ -787,13 +784,11 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
         user
     );
 
-    let maybe_max_epoch: Option<i64> = fetch_one_scalar!(
+    let current_epoch: i64 = fetch_one_scalar!(
         &ctx.pool,
-        "SELECT MAX(epoch) FROM group_session_keys WHERE group_id = $1",
+        "SELECT current_epoch FROM groups WHERE id = $1",
         group_id
     );
-
-    let max_epoch = maybe_max_epoch.unwrap_or(0);
 
     let stmt = "
         SELECT 1 FROM group_session_keys
@@ -807,7 +802,7 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
         stmt,
         group_id,
         user,
-        max_epoch
+        current_epoch
     );
 
     if has_uploaded_session.is_none() {
@@ -851,10 +846,20 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
         &message_body
     );
 
-    let max_epoch: i64 = fetch_one_scalar!(
-        &ctx.pool,
-        "SELECT MAX(epoch) FROM group_session_keys WHERE group_id = $1",
-        group_id
+    let stmt = "
+        INSERT INTO message_decryption_keys (
+            user_id,
+            message_id,
+            blob
+        ) VALUES ($1, $2, $3)
+    ";
+
+    execute!(
+        &mut *tx,
+        stmt,
+        user,
+        message_id,
+        message_key_for_self
     );
 
     let stmt = "
@@ -871,9 +876,9 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
             &mut *tx,
             stmt,
             user_id,
-            max_epoch,
+            current_epoch,
             message_id,
-            &message_key.to_bytes()
+            &message_key_for_others.to_bytes()
         );
     }
 

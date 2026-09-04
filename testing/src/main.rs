@@ -229,13 +229,16 @@ async fn main() -> Result<()> {
             content: "hello bob".to_string()
         });
 
-        let message_key = group_session.encrypt(message_secret);
+        let message_key_for_others = group_session.encrypt(message_secret);
+
+        let message_key_for_self = alice_secret.encrypt(&message_secret);
 
         stream.send(&SendGroupMessageData {
             group_id,
             replied_to: None,
             message_body,
-            message_key
+            message_key_for_others,
+            message_key_for_self
         }).await?;
 
         let msg: Message = stream.receive::<RouteResult<_>>().await??;
@@ -243,7 +246,7 @@ async fn main() -> Result<()> {
         Ok(msg)
     }).await?;
 
-    let message_keys = access_resource(&parent, "conversations.messages.inbox", async |stream| {
+    let bob_message_keys = access_resource(&parent, "conversations.messages.inbox", async |stream| {
         stream.send(&bob_signed_id).await?;
 
         let mut message_keys = HashMap::new();
@@ -288,9 +291,7 @@ async fn main() -> Result<()> {
 
     println!("done with everything on the client");
 
-    let message_key = message_keys[&message.id];
-
-    let body = message_key.decrypt(&message.body)?;
+    let body = bob_message_keys[&message.id].decrypt(&message.body)?;
 
     dbg!(body);
 

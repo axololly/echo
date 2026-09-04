@@ -2,18 +2,12 @@ use std::collections::HashMap;
 
 use echo_types::{CryptoBox, Encrypted, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::prelude::ResultExt;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use vodozemac::megolm::{MegolmMessage, SessionKey};
 
 use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, ok, route, router::EchoContext};
 
-#[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
-pub enum ConversationRouteError {
-    #[error("conversation not found")]
-    ConversationNotFound
-}
-
+// TODO: figure out how to recycle sessions that are no longer required
+// and figure out a more fitting name for the module this route will go in.
 #[route("conversations.messages.inbox")]
 pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
@@ -52,19 +46,13 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
             .map(|(id, key, msg)| (id, key, msg.into()))
             .collect();
 
-        println!("sending {} new keys to decrypt", rows.len());
-
         ctx.stream.send(&ok!(&rows)).await?;
 
         if rows.is_empty() {
             break;
         }
 
-        println!("waiting on the keys to come back");
-
         let keys: HashMap<SnowflakeID, Encrypted<Secret>> = ctx.stream.receive().await?;
-
-        println!("got the keys back!");
 
         let mut tx = ctx
             .pool

@@ -75,15 +75,26 @@ CREATE TABLE friend_requests (
 
 CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);
 
-CREATE TABLE groups (
+CREATE TABLE conversations (
     id INT8 PRIMARY KEY,
-    name TEXT UNIQUE CHECK (char_length(name) <= 20),
-    avatar "AssetID",
-    invite_code VARCHAR(8) UNIQUE CHECK (invite_code ~ '^[A-Z0-9]+$')
+    created_at TIMESTAMP NOT NULL
 );
 
-CREATE TABLE group_members (
-    group_id INT8 REFERENCES groups(id)
+CREATE TABLE groups (
+    id INT8 PRIMARY KEY
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    name TEXT UNIQUE CHECK (char_length(name) <= 20),
+    avatar "AssetID",
+    invite_code VARCHAR(8) UNIQUE CHECK (invite_code ~ '^[A-Z0-9]+$'),
+    current_epoch INT8 NOT NULL CHECK (current_epoch >= 0)
+);
+
+CREATE TABLE conversation_members (
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -93,31 +104,19 @@ CREATE TABLE group_members (
 
     joined_at TIMESTAMP NOT NULL,
 
-    PRIMARY KEY (group_id, user_id)
+    PRIMARY KEY (conversation_id, user_id)
 );
 
 CREATE INDEX idx_conversation_member_ids ON conversation_members(user_id);
 
-CREATE TABLE groups (
-    id INT8 PRIMARY KEY
-        REFERENCES conversations(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    name TEXT NOT NULL
-        CHECK (char_length(name) BETWEEN 1 AND 20),
-
-    avatar "AssetID",
-
-    invite_code TEXT NOT NULL CHECK (invite_code ~ '[0-9A-F]+')
-);
-
 CREATE TABLE group_banned_members (
-    group_id INT8 REFERENCES groups(id)
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    user_id INT8 REFERENCES users(id)
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -210,13 +209,14 @@ CREATE INDEX idx_message_decryption_keys_id ON message_decryption_keys(message_i
 -- These are Olm/Megolm messages containing decryption keys
 -- that need to be added to the 'message_decryption_keys' table.
 CREATE TABLE outgoing_message_keys (
-    recipient_id INT8 NOT NULL,
-    epoch INT8 NOT NULL CHECK (epoch >= 0),
-
     message_id INT8 NOT NULL
         REFERENCES messages(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
+
+    recipient_id INT8 NOT NULL,
+
+    epoch INT8 NOT NULL CHECK (epoch >= 0),
 
     blob BYTEA NOT NULL,
 
@@ -225,23 +225,7 @@ CREATE TABLE outgoing_message_keys (
 
 CREATE INDEX idx_outgoing_messages_id ON outgoing_message_keys(message_id);
 
-CREATE TABLE session_keys (
-    conversation_id INT8 NOT NULL
-        REFERENCES conversations(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    user_id INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    keys BYTEA NOT NULL,
-
-    PRIMARY KEY (conversation_id, user_id)
-);
-
-    -- These are Megolm session keys used for transporting the message keys.
+-- These are Megolm session keys used for transporting the message keys.
 CREATE TABLE group_session_keys (
     group_id INT8 NOT NULL
         REFERENCES groups(id)
