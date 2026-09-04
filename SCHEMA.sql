@@ -48,7 +48,7 @@ CREATE TABLE friendships (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    friends_since TIMESTAMP NOT NULL,
+    friends_since TIMESTAMPTZ NOT NULL,
 
     PRIMARY KEY (user1, user2),
 
@@ -68,7 +68,7 @@ CREATE TABLE friend_requests (
 
     one_time_key BYTEA CHECK (length(one_time_key) = 32),
 
-    sent_at TIMESTAMP NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL,
 
     PRIMARY KEY (sender, receiver)
 );
@@ -77,7 +77,7 @@ CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);
 
 CREATE TABLE conversations (
     id INT8 PRIMARY KEY,
-    created_at TIMESTAMP NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE groups (
@@ -102,14 +102,14 @@ CREATE TABLE conversation_members (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    joined_at TIMESTAMP NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL,
 
     PRIMARY KEY (conversation_id, user_id)
 );
 
 CREATE INDEX idx_conversation_member_ids ON conversation_members(user_id);
 
-CREATE TABLE group_banned_members (
+CREATE TABLE group_members_banned (
     group_id INT8 NOT NULL
         REFERENCES groups(id)
         ON UPDATE CASCADE
@@ -123,7 +123,7 @@ CREATE TABLE group_banned_members (
     PRIMARY KEY (group_id, user_id)
 );
 
-CREATE INDEX idx_group_banned_member_ids ON group_banned_members(user_id);
+CREATE INDEX idx_group_banned_member_ids ON group_members_banned(user_id);
 
 CREATE TYPE "MessageType" AS ENUM(
     'Normal',
@@ -151,7 +151,7 @@ CREATE TABLE messages (
 
     type "MessageType" NOT NULL,
 
-    sent_at TIMESTAMP NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL,
 
     blob BYTEA NOT NULL
 );

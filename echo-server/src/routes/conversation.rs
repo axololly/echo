@@ -17,6 +17,7 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
     let stmt = "
         SELECT
             m.id AS message_id,
+            uc.encryption_public_key,
             gsk.blob AS session_key,
             omk.blob AS message_key
         FROM outgoing_message_keys omk
@@ -25,7 +26,10 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
         INNER JOIN group_session_keys gsk
             ON gsk.sender_id = m.author_id
             AND gsk.recipient_id = omk.recipient_id
+        INNER JOIN users_crypto uc
+            ON gsk.sender_id = uc.user_id
         WHERE gsk.recipient_id = $1
+        AND gsk.sender_id != $1
         LIMIT $2
         OFFSET $3
     ";
@@ -33,7 +37,7 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
     let mut offset: i64 = 0;
 
     loop {
-        let rows: Vec<(SnowflakeID, CryptoBox<SessionKey>, SqlxMegolmMessage)> = fetch_all_as!(
+        let rows: Vec<(SnowflakeID, [u8; 32], CryptoBox<SessionKey>, SqlxMegolmMessage)> = fetch_all_as!(
             &ctx.pool,
             stmt,
             user,
@@ -41,9 +45,9 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
             offset
         );
 
-        let rows: Vec<(_, _, MegolmMessage)> = rows
+        let rows: Vec<(_, crypto_box::PublicKey, _, MegolmMessage)> = rows
             .into_iter()
-            .map(|(id, key, msg)| (id, key, msg.into()))
+            .map(|(id, public_key, session_key, megolm_msg)| (id, public_key.into(), session_key, megolm_msg.into()))
             .collect();
 
         ctx.stream.send(&ok!(&rows)).await?;

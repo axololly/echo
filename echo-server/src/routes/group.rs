@@ -241,13 +241,27 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let now = Utc::now();
 
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
     execute!(
-        &ctx.pool,
+        &mut *tx,
         "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
         group_id,
         user,
         now
     );
+
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET current_epoch = current_epoch + 1 WHERE id = $1",
+        group_id
+    );
+
+    tx.commit().await.context(E::Database)?;
 
     get_group_from_db(ctx, id).await
 }
@@ -263,10 +277,9 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         .context(E::InvalidData)?;
 
     let stmt = "
-        DELETE FROM conversation_members
+        SELECT 1 FROM conversation_members
         WHERE conversation_id = $1
         AND user_id = $2
-        RETURNING 1
     ";
 
     let was_removed: Option<i32> = fetch_opt_scalar!(&ctx.pool, stmt, group_id, user);
@@ -274,6 +287,27 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     if was_removed.is_none() {
         bail!(E::Group(G::GroupNotFound));
     }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    execute!(
+        &mut *tx,
+        "DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        group_id,
+        user
+    );
+
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        group_id
+    );
+
+    tx.commit().await.context(E::Database)?;
 
     Ok(())
 }
@@ -649,7 +683,7 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
 
         let public_keys: HashMap<SnowflakeID, PublicKey> = rows
             .into_iter()
-            .map(|(id, key_bytes)| (id, PublicKey::from_bytes(key_bytes)))
+            .map(|(id, key_bytes)| (id, key_bytes.into()))
             .collect();
 
         ctx.stream.send(&ok!(public_keys)).await?;

@@ -24,11 +24,7 @@ async fn access_resource<T>(
 
     stream.receive::<RouteResult<()>>().await??;
 
-    let result = f(&mut stream).await;
-
-    // stream.close()?;
-
-    result
+    f(&mut stream).await
 }
 
 type RouteResult<T> = std::result::Result<T, RouteError>;
@@ -175,7 +171,7 @@ async fn main() -> Result<()> {
         Ok(())
     }).await?;
 
-    let group_id = access_resource(&parent, "groups.create", async |stream| {
+    let group = access_resource(&parent, "groups.create", async |stream| {
         stream.send(&alice_signed_id).await?;
 
         stream.send(&CreateNewGroupData {
@@ -185,15 +181,15 @@ async fn main() -> Result<()> {
 
         let group: Group = stream.receive::<RouteResult<_>>().await??;
 
-        Ok(group.id)
+        Ok(group)
     }).await?;
 
-    println!("group ID: {group_id}");
+    println!("group ID: {}", group.id);
 
-    let mut group_session = access_resource(&parent, "groups.sessions.ensure", async |stream| {
+    let mut alice_group_session = access_resource(&parent, "groups.sessions.ensure", async |stream| {
         stream.send(&alice_signed_id).await?;
 
-        stream.send(&group_id).await?;
+        stream.send(&group.id).await?;
 
         let needs_uploading: bool = stream.receive::<RouteResult<_>>().await??;
 
@@ -220,7 +216,7 @@ async fn main() -> Result<()> {
         Ok(group_session)
     }).await?;
 
-    let message = access_resource(&parent, "groups.messages.send", async |stream| {
+    let alice_message = access_resource(&parent, "groups.messages.send", async |stream| {
         stream.send(&alice_signed_id).await?;
 
         let message_secret = Secret::random();
@@ -229,12 +225,85 @@ async fn main() -> Result<()> {
             content: "hello bob".to_string()
         });
 
-        let message_key_for_others = group_session.encrypt(message_secret);
+        let message_key_for_others = alice_group_session.encrypt(message_secret);
 
         let message_key_for_self = alice_secret.encrypt(&message_secret);
 
         stream.send(&SendGroupMessageData {
-            group_id,
+            group_id: group.id,
+            replied_to: None,
+            message_body,
+            message_key_for_others,
+            message_key_for_self
+        }).await?;
+
+        let msg: Message = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(msg)
+    }).await?;
+
+    let (chloe, _) = create_account(&parent, "chloe").await?;
+
+    let chloe_secret = chloe.secret.unlock("6767")?;
+    let chloe_signed_id = chloe_secret.sign(chloe.id);
+
+    access_resource(&parent, "groups.join", async |stream| {
+        stream.send(&chloe_signed_id).await?;
+
+        stream.send(&group.invite_code).await?;
+
+        let new_group: Group = stream.receive::<RouteResult<_>>().await??;
+
+        assert_eq!(new_group.id, group.id, "group IDs were not the same somehow");
+
+        Ok(())
+    }).await?;
+
+    let mut chloe_group_session = access_resource(&parent, "groups.sessions.ensure", async |stream| {
+        stream.send(&chloe_signed_id).await?;
+
+        stream.send(&group.id).await?;
+
+        let needs_uploading: bool = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(needs_uploading);
+
+        let keys: HashMap<SnowflakeID, PublicKey> = stream.receive::<RouteResult<_>>().await??;
+
+        let group_session = GroupSession::new(MegolmConfig::version_1());
+
+        let session_key = group_session.session_key();
+
+        let inbounds = keys
+            .into_iter()
+            .map(|(id, key)| (id, chloe_secret.box_for(&session_key, key)))
+            .collect();
+
+        let upload_data = EncryptedMegolmSession {
+            outbound: chloe_secret.encrypt(&group_session.pickle()),
+            inbounds
+        };
+
+        stream.send(&upload_data).await?;
+
+        Ok(group_session)
+    }).await?;
+
+    let chloe_message = access_resource(&parent, "groups.messages.send", async |stream| {
+        stream.send(&chloe_signed_id).await?;
+
+        let message_secret = Secret::random();
+
+        let message_body = message_secret.encrypt(&MessageBody {
+            content: "hello everyone".to_string()
+        });
+
+        let message_key_for_others = chloe_group_session.encrypt(message_secret);
+
+        let message_key_for_self = chloe_secret.encrypt(&message_secret);
+
+        stream.send(&SendGroupMessageData {
+            group_id: group.id,
             replied_to: None,
             message_body,
             message_key_for_others,
@@ -254,18 +323,14 @@ async fn main() -> Result<()> {
         loop {
             let mut map: HashMap<SnowflakeID, Encrypted<Secret>> = HashMap::new();
 
-            println!("trying to receive rows on client");
-
-            let rows: Vec<(SnowflakeID, CryptoBox<SessionKey>, MegolmMessage)> = stream.receive::<RouteResult<_>>().await?.unwrap();
-
-            println!("received rows on client");
+            let rows: Vec<(SnowflakeID, PublicKey, CryptoBox<SessionKey>, MegolmMessage)> = stream.receive::<RouteResult<_>>().await?.unwrap();
 
             if rows.is_empty() {
                 break;
             }
 
-            for (message_id, session_key, key_message) in rows {
-                let session_key = bob_secret.unbox_from(&session_key, alice_secret.into())?;
+            for (message_id, public_key, session_key, key_message) in rows {
+                let session_key = bob_secret.unbox_from(&session_key, public_key).unwrap();
 
                 let mut inbound = InboundGroupSession::new(
                     &session_key,
@@ -279,8 +344,6 @@ async fn main() -> Result<()> {
                 message_keys.insert(message_id, message_key);
 
                 map.insert(message_id, alice_secret.encrypt(&message_key));
-
-                println!("converted a key!");
             }
 
             stream.send(&map).await?;
@@ -289,11 +352,8 @@ async fn main() -> Result<()> {
         Ok(message_keys)
     }).await?;
 
-    println!("done with everything on the client");
-
-    let body = bob_message_keys[&message.id].decrypt(&message.body)?;
-
-    dbg!(body);
+    println!("alice said: {:?}", bob_message_keys[&alice_message.id].decrypt(&alice_message.body)?.content);
+    println!("chloe said: {:?}", bob_message_keys[&chloe_message.id].decrypt(&chloe_message.body)?.content);
 
     Ok(())
 }

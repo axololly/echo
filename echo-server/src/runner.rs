@@ -69,8 +69,6 @@ async fn handle_incoming_requests(
 
         let resource: String = stream.receive().await?;
 
-        println!("accessing resource {resource:?}");
-
         let ctx = EchoContext {
             resource,
             stream,
