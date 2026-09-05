@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crypto_box = { version = "0.9.1", features = ["chacha20", "serde", "std"] }
+akd = "0.13.0"
 echo-server = { path = "../echo-server" }
 echo-types = { path = "../echo-types" }
 pgtemp = "0.7.1"
 quinn = "0.11.11"
+rand = "0.10.2"
 rcgen = "0.14.9"
 rootcause = "0.13.0"
 rustls-pki-types = "1.15.1"

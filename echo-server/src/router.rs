@@ -1,6 +1,7 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use async_trait::async_trait;
+use echo_akd::EchoAkd;
 use sqlx::postgres::PgPool;
 
 use chrono::Utc;
@@ -119,7 +120,8 @@ pub struct EchoContext {
     pub resource: String,
     pub pool: PgPool,
     pub stream: Stream,
-    pub user: Option<SnowflakeID>
+    pub user: Option<SnowflakeID>,
+    pub akd: EchoAkd
 }
 
 pub struct EchoRouter {
@@ -163,7 +165,6 @@ impl EchoRouter {
             // User routes
             create_new_user
             get_user
-            get_user_crypto
             get_user_data
             get_friends
             get_friend_requests
@@ -173,6 +174,11 @@ impl EchoRouter {
 
             // Conversation routes
             manage_user_inbox
+
+            // AKD routes
+            get_user_crypto_with_proof
+            verify_user_crypto_history
+            get_akd_public_key
         };
 
         router

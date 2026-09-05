@@ -456,6 +456,7 @@ impl<T> Deref for Signed<T> {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CryptoBox<T> {
+    pub key: crypto_box::PublicKey,
     payload: Vec<u8>,
     nonce: [u8; 24],
     _data: PhantomData<T>
@@ -474,6 +475,7 @@ impl<T: Serialize> CryptoBox<T> {
             .expect("failed to encrypt");
 
         Self {
+            key: public_key,
             payload,
             nonce,
             _data: PhantomData

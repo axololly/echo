@@ -42,13 +42,13 @@ pub struct User {
 #[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
 pub struct UserData {
     pub settings: Encrypted<UserSettings>,
+    pub olm_account: Encrypted<AccountPickle>
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UserCrypto {
-    pub olm_account: Encrypted<AccountPickle>,
-    // TODO: add public key field
-    pub signature_verifier: SignatureVerifier
+    pub signature_verifier: SignatureVerifier,
+    pub public_key: crypto_box::PublicKey
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

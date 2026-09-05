@@ -1,5 +1,6 @@
 use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 
+use echo_akd::EchoAkd;
 use rootcause::{Result, option_ext::OptionExt};
 use sqlx::postgres::PgPool;
 
@@ -13,7 +14,8 @@ pub async fn run(
     key: PrivateKeyDer<'static>,
     max_connections: usize,
     router: Arc<EchoRouter>,
-    pool: PgPool
+    pool: PgPool,
+    akd: EchoAkd
 ) -> Result<()> {
     let mut crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -53,7 +55,12 @@ pub async fn run(
 
         let conn = inc.await?;
 
-        tokio::spawn(handle_incoming_requests(conn, router.clone(), pool.clone()));
+        tokio::spawn(handle_incoming_requests(
+            conn,
+            router.clone(),
+            pool.clone(),
+            akd.clone()
+        ));
     }
 
     Ok(())
@@ -62,7 +69,8 @@ pub async fn run(
 async fn handle_incoming_requests(
     parent: quinn::Connection,
     router: Arc<EchoRouter>,
-    pool: PgPool
+    pool: PgPool,
+    akd: EchoAkd
 ) -> Result<()> {
     loop {
         let mut stream = Stream::accept_bi(&parent).await?;
@@ -73,6 +81,7 @@ async fn handle_incoming_requests(
             resource,
             stream,
             pool: pool.clone(),
+            akd: akd.clone(),
             user: None
         };
 

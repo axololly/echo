@@ -15,7 +15,7 @@ CREATE TABLE users (
     activity "Activity",
     about_me TEXT CHECK (char_length(about_me) <= 2000),
     status TEXT CHECK (char_length(status) <= 200),
-    secret BYTEA -- TODO: add length check
+    secret BYTEA NOT NULL -- TODO: add length check
 );
 
 CREATE TABLE users_data (
@@ -23,20 +23,9 @@ CREATE TABLE users_data (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    settings BYTEA NOT NULL
-);
+    settings BYTEA NOT NULL,
 
-CREATE TABLE users_crypto (
-    user_id INT8 REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    olm_account BYTEA NOT NULL,
-
-    encryption_public_key BYTEA NOT NULL
-        CHECK (length(encryption_public_key) = 32),
-
-    signature_verifier BYTEA NOT NULL
+    olm_account BYTEA NOT NULL
 );
 
 CREATE TABLE friendships (

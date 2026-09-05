@@ -1,10 +1,21 @@
 use std::collections::HashMap;
 
+use echo_akd::EchoLookupProof;
 use echo_types::{CryptoBox, Encrypted, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::prelude::ResultExt;
+use serde::{Deserialize, Serialize};
 use vodozemac::megolm::{MegolmMessage, SessionKey};
 
 use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, ok, route, router::EchoContext};
+
+#[derive(Deserialize, Serialize)]
+pub struct InboxEntry {
+    pub message_id: SnowflakeID,
+    pub author_id: SnowflakeID,
+    pub lookup: EchoLookupProof,
+    pub session_key: CryptoBox<SessionKey>,
+    pub megolm_message: MegolmMessage
+}
 
 // TODO: figure out how to recycle sessions that are no longer required
 // and figure out a more fitting name for the module this route will go in.
@@ -16,18 +27,16 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
 
     let stmt = "
         SELECT
-            m.id AS message_id,
-            uc.encryption_public_key,
-            gsk.blob AS session_key,
-            omk.blob AS message_key
+            m.id,
+            gsk.sender_id,
+            gsk.blob,
+            omk.blob
         FROM outgoing_message_keys omk
         INNER JOIN messages m
             ON omk.message_id = m.id
         INNER JOIN group_session_keys gsk
             ON gsk.sender_id = m.author_id
             AND gsk.recipient_id = omk.recipient_id
-        INNER JOIN users_crypto uc
-            ON gsk.sender_id = uc.user_id
         WHERE gsk.recipient_id = $1
         AND gsk.sender_id != $1
         LIMIT $2
@@ -37,7 +46,7 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
     let mut offset: i64 = 0;
 
     loop {
-        let rows: Vec<(SnowflakeID, [u8; 32], CryptoBox<SessionKey>, SqlxMegolmMessage)> = fetch_all_as!(
+        let rows: Vec<(SnowflakeID, SnowflakeID, CryptoBox<SessionKey>, SqlxMegolmMessage)> = fetch_all_as!(
             &ctx.pool,
             stmt,
             user,
@@ -45,14 +54,27 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
             offset
         );
 
-        let rows: Vec<(_, crypto_box::PublicKey, _, MegolmMessage)> = rows
-            .into_iter()
-            .map(|(id, public_key, session_key, megolm_msg)| (id, public_key.into(), session_key, megolm_msg.into()))
-            .collect();
+        let mut entries: Vec<InboxEntry> = vec![];
 
-        ctx.stream.send(&ok!(&rows)).await?;
+        for (message_id, author_id, session_key, megolm_msg) in rows {
+            let lookup = ctx
+                .akd
+                .single_lookup(&author_id)
+                .await
+                .context(E::Database)?;
 
-        if rows.is_empty() {
+            entries.push(InboxEntry {
+                message_id,
+                author_id,
+                lookup,
+                session_key,
+                megolm_message: megolm_msg.into()
+            });
+        }
+
+        ctx.stream.send(&ok!(&entries)).await?;
+
+        if entries.is_empty() {
             break;
         }
 

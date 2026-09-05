@@ -1,4 +1,4 @@
-use echo_types::{SignatureVerifier, Signed, SnowflakeID};
+use echo_types::{Signed, SnowflakeID};
 use rootcause::{bail, prelude::ResultExt};
 
 use crate::{error::{RouteError as E, RouteResult}, fetch_one_scalar};
@@ -20,13 +20,22 @@ pub async fn validate_user(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
         id
     );
 
-    println!("[ authenticating as: {name} (resource: {:?}) ]", ctx.resource);
+    let vrf_public_key = ctx
+        .akd
+        .get_public_key()
+        .await
+        .context(E::Database)?;
 
-    let verifier: SignatureVerifier = fetch_one_scalar!(
-        &ctx.pool,
-        "SELECT signature_verifier FROM users_crypto WHERE user_id = $1",
-        id
-    );
+    let verifier = ctx
+        .akd
+        .single_lookup(id)
+        .await
+        .context(E::Database)?
+        .verify(id, vrf_public_key.as_bytes())
+        .context(E::Database)?
+        .signature_verifier;
+
+    println!("[ authenticating as: {name} (resource: {:?}) -> {} ]", ctx.resource, signed_id.verify(verifier));
 
     if !signed_id.verify(verifier) {
         bail!(E::UserAuthFailed);

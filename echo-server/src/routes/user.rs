@@ -29,8 +29,7 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
         .stream
         .receive()
-        .await
-        .map_err(|_| E::InvalidData)?;
+        .await?;
 
     let stmt = "
         SELECT
@@ -57,8 +56,7 @@ pub async fn get_user_data(ctx: &mut EchoContext) -> RouteResult<UserData> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
         .stream
         .receive()
-        .await
-        .map_err(|_| E::InvalidData)?;
+        .await?;
 
     let user_data: UserData = fetch_opt_as!(
         &ctx.pool,
@@ -67,23 +65,6 @@ pub async fn get_user_data(ctx: &mut EchoContext) -> RouteResult<UserData> {
     ).context(E::User(U::UserNotFound))?;
 
     Ok(user_data)
-}
-
-#[route("users.crypto.get")]
-pub async fn get_user_crypto(ctx: &mut EchoContext) -> RouteResult<UserCrypto> {
-    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
-        .stream
-        .receive()
-        .await
-        .map_err(|_| E::InvalidData)?;
-
-    let user_crypto: UserCrypto = fetch_opt_as!(
-        &ctx.pool,
-        "SELECT olm_account, signature_verifier FROM users_crypto WHERE id = $1",
-        user_id
-    ).context(E::User(U::UserNotFound))?;
-
-    Ok(user_crypto)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -109,8 +90,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let row = fetch_opt!(
         &ctx.pool,
@@ -169,28 +149,22 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO users_data (user_id, settings) VALUES ($1, $2)",
+        "INSERT INTO users_data (user_id, settings, olm_account) VALUES ($1, $2, $3)",
         &user.id,
-        &settings
+        &settings,
+        &olm_account
     );
 
-    let stmt = "
-        INSERT INTO users_crypto (
-            user_id,
-            olm_account,
-            encryption_public_key,
-            signature_verifier
-        ) VALUES ($1, $2, $3, $4)
-    ";
+    let crypto = UserCrypto {
+        signature_verifier,
+        public_key: encryption_public_key
+    };
 
-    execute!(
-        &mut *tx,
-        stmt,
-        &user.id,
-        &olm_account,
-        encryption_public_key.to_bytes(),
-        &signature_verifier
-    );
+    ctx
+        .akd
+        .insert(&id, &crypto)
+        .await
+        .context(E::Database)?;
 
     tx.commit().await.context(E::Database)?;
 
@@ -237,8 +211,7 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<Fri
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let sender = ctx.user.unwrap();
 
@@ -287,8 +260,7 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     let sender: SnowflakeID = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let recipient = ctx.user.unwrap();
 
@@ -322,13 +294,12 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     Ok(())
 }
 
-#[route("users.password.reset")]
+#[route("users.reset_password")]
 pub async fn reset_user_password(ctx: &mut EchoContext) -> RouteResult<()> {
     let new_secret: PasswordProtected<Secret> = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let user = ctx.user.unwrap();
 

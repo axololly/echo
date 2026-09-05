@@ -1,15 +1,15 @@
-use std::{collections::HashMap, net::ToSocketAddrs, str::FromStr, sync::Arc};
+use std::{collections::HashMap, fs, net::ToSocketAddrs, str::FromStr, sync::Arc};
 
-use crypto_box::PublicKey;
+use akd::ecvrf::VRFPublicKey;
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
-use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateNewFriendRequestData, CreateNewGroupData, CreateNewUserData, EncryptedMegolmSession, SendGroupMessageData}, runner::run, stream::Stream};
-use echo_types::{CryptoBox, Encrypted, Group, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings};
+use echo_server::{akd::{EchoAkd, EchoLookupProof}, error::RouteError, router::EchoRouter, routes::{CreateNewFriendRequestData, CreateNewGroupData, CreateNewUserData, EncryptedMegolmSession, InboxEntry, SendGroupMessageData}, runner::run, stream::Stream};
+use echo_types::{Encrypted, Group, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
-use vodozemac::{megolm::{GroupSession, InboundGroupSession, MegolmMessage, SessionConfig as MegolmConfig, SessionKey}, olm::Account};
+use vodozemac::{megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmConfig}, olm::Account};
 
 async fn access_resource<T>(
     parent: &quinn::Connection,
@@ -77,10 +77,19 @@ async fn main() -> Result<()> {
     {
         let mut conn = pool.acquire().await?;
 
-        let query = include_str!("../../SCHEMA.sql");
+        conn.execute(include_str!("../../echo-server/SCHEMA.sql")).await?;
 
-        conn.execute(query).await?;
+        conn.execute(include_str!("../../echo-akd/SCHEMA.sql")).await?;
     }
+
+    let vrf_path = "/tmp/AKD_SECRET";
+
+    fs::write(vrf_path, rand::random::<[u8; 32]>())?;
+
+    let akd = EchoAkd::new(
+        pool.clone(),
+        vrf_path
+    ).await?;
 
     let CertifiedKey { cert, signing_key } = generate_simple_self_signed(vec![
         "localhost".to_string()
@@ -96,7 +105,8 @@ async fn main() -> Result<()> {
         key.into(),
         10,
         Arc::new(EchoRouter::new().await),
-        pool
+        pool,
+        akd
     ));
 
     let into_socket_addr = |raw: &str| raw
@@ -184,7 +194,11 @@ async fn main() -> Result<()> {
         Ok(group)
     }).await?;
 
-    println!("group ID: {}", group.id);
+    let vrf_public_key = access_resource(&parent, "akd.public_key.get", async |stream| {
+        let obj: VRFPublicKey = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(obj)
+    }).await?;
 
     let mut alice_group_session = access_resource(&parent, "groups.sessions.ensure", async |stream| {
         stream.send(&alice_signed_id).await?;
@@ -195,16 +209,19 @@ async fn main() -> Result<()> {
 
         assert!(needs_uploading);
 
-        let keys: HashMap<SnowflakeID, PublicKey> = stream.receive::<RouteResult<_>>().await??;
+        let keys: HashMap<SnowflakeID, EchoLookupProof> = stream.receive::<RouteResult<_>>().await??;
 
         let group_session = GroupSession::new(MegolmConfig::version_1());
 
         let session_key = group_session.session_key();
 
-        let inbounds = keys
-            .into_iter()
-            .map(|(id, key)| (id, alice_secret.box_for(&session_key, key)))
-            .collect();
+        let mut inbounds = HashMap::new();
+
+        for (id, proof) in keys {
+            let crypto = proof.verify(&id, vrf_public_key.as_bytes())?;
+
+            inbounds.insert(id, alice_secret.box_for(&session_key, crypto.public_key));
+        }
 
         let upload_data = EncryptedMegolmSession {
             outbound: alice_secret.encrypt(&group_session.pickle()),
@@ -268,16 +285,19 @@ async fn main() -> Result<()> {
 
         assert!(needs_uploading);
 
-        let keys: HashMap<SnowflakeID, PublicKey> = stream.receive::<RouteResult<_>>().await??;
+        let keys: HashMap<SnowflakeID, EchoLookupProof> = stream.receive::<RouteResult<_>>().await??;
 
         let group_session = GroupSession::new(MegolmConfig::version_1());
 
         let session_key = group_session.session_key();
 
-        let inbounds = keys
-            .into_iter()
-            .map(|(id, key)| (id, chloe_secret.box_for(&session_key, key)))
-            .collect();
+        let mut inbounds = HashMap::new();
+
+        for (id, proof) in keys {
+            let crypto = proof.verify(&id, vrf_public_key.as_bytes())?;
+
+            inbounds.insert(id, chloe_secret.box_for(&session_key, crypto.public_key));
+        }
 
         let upload_data = EncryptedMegolmSession {
             outbound: chloe_secret.encrypt(&group_session.pickle()),
@@ -323,27 +343,29 @@ async fn main() -> Result<()> {
         loop {
             let mut map: HashMap<SnowflakeID, Encrypted<Secret>> = HashMap::new();
 
-            let rows: Vec<(SnowflakeID, PublicKey, CryptoBox<SessionKey>, MegolmMessage)> = stream.receive::<RouteResult<_>>().await?.unwrap();
+            let inbox_entries: Vec<InboxEntry> = stream.receive::<RouteResult<_>>().await?.unwrap();
 
-            if rows.is_empty() {
+            if inbox_entries.is_empty() {
                 break;
             }
 
-            for (message_id, public_key, session_key, key_message) in rows {
-                let session_key = bob_secret.unbox_from(&session_key, public_key).unwrap();
+            for entry in inbox_entries {
+                let crypto = entry.lookup.verify(&entry.author_id, vrf_public_key.as_bytes())?;
+
+                let session_key = bob_secret.unbox_from(&entry.session_key, crypto.public_key).unwrap();
 
                 let mut inbound = InboundGroupSession::new(
                     &session_key,
                     MegolmConfig::version_1()
                 );
 
-                let dec = inbound.decrypt(&key_message)?;
+                let dec = inbound.decrypt(&entry.megolm_message)?;
 
                 let message_key = Secret::try_from_bytes(&dec.plaintext)?;
 
-                message_keys.insert(message_id, message_key);
+                message_keys.insert(entry.message_id, message_key);
 
-                map.insert(message_id, alice_secret.encrypt(&message_key));
+                map.insert(entry.message_id, alice_secret.encrypt(&message_key));
             }
 
             stream.send(&map).await?;

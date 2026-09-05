@@ -1,0 +1,14 @@
+[package]
+name = "echo-akd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+akd = { version = "0.13.0", features = ["whatsapp_v1"] }
+async-trait = "0.1.92"
+bitcode = { version = "0.6.9", features = ["serde"] }
+echo-types = { path = "../echo-types" }
+rootcause = "0.13.0"
+serde = "1.0.229"
+sqlx = { version = "0.9.0", features = ["postgres", "runtime-tokio"] }
+thiserror = "2.0.20"

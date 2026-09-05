@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{TimeDelta, Utc};
-use crypto_box::PublicKey;
+use echo_akd::EchoLookupProof;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -65,8 +65,7 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let id: SnowflakeID = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     get_group_from_db(ctx, id).await
 }
@@ -98,8 +97,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let owner = ctx.user.unwrap();
 
@@ -213,8 +211,7 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let invite_code: String = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let group_id: Option<SnowflakeID> = fetch_opt_scalar!(
         &ctx.pool,
@@ -273,8 +270,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     let group_id: SnowflakeID = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let stmt = "
         SELECT 1 FROM conversation_members
@@ -319,8 +315,7 @@ pub async fn get_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String>
     let group_id: SnowflakeID = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let stmt = "
         SELECT invite_code FROM groups
@@ -369,8 +364,7 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Stri
     let group_id: SnowflakeID = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     if user != get_group_owner(ctx, group_id).await? {
         bail!(E::Group(G::OnlyForOwner));
@@ -452,8 +446,7 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     if user != get_group_owner(ctx, group_id).await? {
         bail!(E::Group(G::OnlyForOwner));
@@ -483,8 +476,7 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     if user != get_group_owner(ctx, group_id).await? {
         bail!(E::Group(G::OnlyForOwner));
@@ -529,8 +521,7 @@ pub async fn unban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     if user != get_group_owner(ctx, group_id).await? {
         bail!(E::Group(G::OnlyForOwner));
@@ -665,28 +656,31 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
             .context(E::Database)?;
 
         let stmt = "
-            SELECT
-                m.user_id,
-                uc.encryption_public_key
-            FROM conversation_members m
-            INNER JOIN users_crypto uc USING (user_id)
-            WHERE m.conversation_id = $1
-            AND m.user_id != $2
+            SELECT user_id FROM conversation_members
+            WHERE conversation_id = $1
+            AND user_id != $2
         ";
 
-        let rows: Vec<(SnowflakeID, [u8; 32])> = fetch_all_as!(
+        let other_members: Vec<SnowflakeID> = fetch_all_scalar!(
             &ctx.pool,
             stmt,
             group_id,
             user
         );
 
-        let public_keys: HashMap<SnowflakeID, PublicKey> = rows
-            .into_iter()
-            .map(|(id, key_bytes)| (id, key_bytes.into()))
-            .collect();
+        let mut cryptos: HashMap<SnowflakeID, EchoLookupProof> = HashMap::new();
 
-        ctx.stream.send(&ok!(public_keys)).await?;
+        for member in other_members {
+            let crypto = ctx
+                .akd
+                .single_lookup(&member)
+                .await
+                .context(E::Database)?;
+
+            cryptos.insert(member, crypto);
+        }
+
+        ctx.stream.send(&ok!(cryptos)).await?;
 
         let EncryptedMegolmSession {
             outbound,
@@ -775,8 +769,7 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
     } = ctx
         .stream
         .receive()
-        .await
-        .context(E::InvalidData)?;
+        .await?;
 
     let row: Option<i32> = fetch_opt_scalar!(
         &ctx.pool,
