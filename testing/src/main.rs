@@ -239,7 +239,8 @@ async fn main() -> Result<()> {
         let message_secret = Secret::random();
 
         let message_body = message_secret.encrypt(&MessageBody {
-            content: "hello bob".to_string()
+            content: "hello bob".to_string(),
+            attachments: vec![]
         });
 
         let message_key_for_others = alice_group_session.encrypt(message_secret);
@@ -315,7 +316,8 @@ async fn main() -> Result<()> {
         let message_secret = Secret::random();
 
         let message_body = message_secret.encrypt(&MessageBody {
-            content: "hello everyone".to_string()
+            content: "hello everyone".to_string(),
+            attachments: vec![]
         });
 
         let message_key_for_others = chloe_group_session.encrypt(message_secret);

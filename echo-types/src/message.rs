@@ -13,7 +13,8 @@ pub struct Attachment {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MessageBody {
-    pub content: String
+    pub content: String,
+    pub attachments: Vec<Attachment>
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,7 +22,6 @@ pub struct Message {
     pub id: SnowflakeID,
     pub parent: Option<SnowflakeID>,
     pub body: Encrypted<MessageBody>,
-    pub attachments: Vec<Attachment>
 }
 
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Serialize)]
@@ -74,4 +74,15 @@ impl sqlx::Type<sqlx::Postgres> for SqlxMegolmMessage {
     }
 }
 
-// TODO: add Emoji and Reaction structs
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Emoji {
+    pub id: SnowflakeID,
+    pub asset: AssetID,
+    pub name: String
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Reaction {
+    pub message_id: SnowflakeID,
+    pub emoji_id: SnowflakeID
+}

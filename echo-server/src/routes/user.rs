@@ -108,7 +108,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         id,
         name: username.clone(),
         display_name: username,
-        avatar: DEFAULT_PFP_ASSET_ID.clone(),
+        avatar: *DEFAULT_PFP_ASSET_ID,
         activity: Activity::Online,
         about_me: String::new(),
         status: String::new(),

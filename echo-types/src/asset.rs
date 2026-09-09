@@ -1,17 +1,20 @@
 use std::{fmt::{Debug, Display}, sync::LazyLock};
 
 use blake3::OUT_LEN as ASSET_ID_SIZE;
-use sqlx::{Decode, Encode, postgres::PgTypeInfo};
+use sqlx::{encode::IsNull, postgres::PgTypeInfo};
 use serde::{Deserialize, Serialize};
 
 pub type RawAssetID = [u8; ASSET_ID_SIZE];
 
-#[derive(Clone, Decode, Deserialize, Encode, Eq, Hash, PartialEq, Serialize)]
-pub struct AssetID(String);
+#[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct AssetID(RawAssetID);
 
 impl Debug for AssetID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        f
+            .debug_tuple("AssetID")
+            .field(&hex::encode(self.0))
+            .finish()
     }
 }
 
@@ -27,12 +30,37 @@ impl sqlx::Type<sqlx::Postgres> for AssetID {
     }
 }
 
+impl sqlx::Encode<'_, sqlx::Postgres> for AssetID {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+    ) -> Result<IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(hex::encode(self.0).as_bytes());
+
+        Ok(IsNull::No)
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Postgres> for AssetID {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = value.as_bytes()?;
+
+        let mut buf = [0; 32];
+
+        hex::decode_to_slice(bytes, &mut buf)?;
+
+        Ok(Self(buf))
+    }
+}
+
 impl AssetID {
     /// Build an [`AssetID`] from a byte array.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
         let hash = blake3::hash(bytes.as_ref());
 
-        Self(hex::encode(hash.as_bytes()))
+        Self(*hash.as_bytes())
     }
 }
 

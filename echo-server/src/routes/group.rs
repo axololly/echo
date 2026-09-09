@@ -198,7 +198,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let group = Group {
         id: group_id,
         name,
-        avatar: (*DEFAULT_PFP_ASSET_ID).clone(),
+        avatar: *DEFAULT_PFP_ASSET_ID,
         members,
         invite_code
     };
@@ -914,8 +914,7 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
     Ok(Message {
         id: message_id,
         parent: replied_to,
-        body: message_body,
-        attachments: vec![] // TODO: support this
+        body: message_body
     })
 }
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Message, SnowflakeID};
+use crate::{Message, Reaction, SnowflakeID};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum SystemEvent {
@@ -15,5 +15,7 @@ pub enum Event {
     SendMessage(Message),
     EditMessage(SnowflakeID, Message),
     DeleteMessage(SnowflakeID),
-    System(SystemEvent)
+    System(SystemEvent),
+    AddReaction(Reaction),
+    RemoveReaction(Reaction)
 }
