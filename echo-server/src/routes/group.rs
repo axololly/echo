@@ -47,7 +47,7 @@ async fn get_group_from_db(
 
     let (name, avatar, invite_code) = data;
 
-    let stmt = "SELECT user_id, joined_at FROM conversation_members WHERE conversation_id = $1";
+    let stmt = "SELECT user_id, joined_at FROM group_members WHERE group_id = $1";
 
     let members = fetch_all_as!(&ctx.pool, stmt, id);
 
@@ -162,7 +162,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
+        "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
         group_id,
         owner,
         owner_join_time
@@ -171,7 +171,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     for (offset, other_user) in initial_members.iter().enumerate() {
         execute!(
             &mut *tx,
-            "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
+            "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
             group_id,
             other_user,
             owner_join_time + TimeDelta::milliseconds((offset + 1) as i64)
@@ -246,7 +246,7 @@ pub async fn join_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
+        "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
         group_id,
         user,
         now
@@ -273,8 +273,8 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         .await?;
 
     let stmt = "
-        SELECT 1 FROM conversation_members
-        WHERE conversation_id = $1
+        SELECT 1 FROM group_members
+        WHERE group_id = $1
         AND user_id = $2
     ";
 
@@ -292,7 +292,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2",
         group_id,
         user
     );
@@ -321,8 +321,8 @@ pub async fn get_group_invite_code(ctx: &mut EchoContext) -> RouteResult<String>
         SELECT invite_code FROM groups
         WHERE id = $1
         AND EXISTS(
-            SELECT 1 FROM conversation_members
-            WHERE conversation_id = $1
+            SELECT 1 FROM group_members
+            WHERE group_id = $1
             AND user_id = $2
         )
     ";
@@ -346,8 +346,8 @@ async fn get_group_owner(
     group_id: SnowflakeID
 ) -> RouteResult<SnowflakeID> {
     let stmt = "
-        SELECT user_id FROM conversation_members
-        WHERE conversation_id = $1
+        SELECT user_id FROM group_members
+        WHERE group_id = $1
         ORDER BY joined_at
         LIMIT 1
     ";
@@ -371,8 +371,8 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Stri
     }
 
     let stmt = "
-        SELECT 1 FROM conversation_members
-        WHERE conversation_id = $1
+        SELECT 1 FROM group_members
+        WHERE group_id = $1
         AND user_id = $2
     ";
 
@@ -458,7 +458,7 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &ctx.pool,
-        "DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2",
         group_id,
         member_id
     );
@@ -494,7 +494,7 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2",
         group_id,
         member_id
     );
@@ -582,7 +582,7 @@ pub async fn edit_group_metadata(ctx: &mut EchoContext) -> RouteResult<()> {
     if let Some(name) = new_name {
         execute!(
             &mut *tx,
-            "UPDATE groups SET name = $2 WHERE conversation_id = $1",
+            "UPDATE groups SET name = $2 WHERE id = $1",
             group_id,
             name
         );
@@ -591,7 +591,7 @@ pub async fn edit_group_metadata(ctx: &mut EchoContext) -> RouteResult<()> {
     if let Some(avatar) = new_avatar {
         execute!(
             &mut *tx,
-            "UPDATE groups SET name = $2 WHERE conversation_id = $1",
+            "UPDATE groups SET name = $2 WHERE id = $1",
             group_id,
             avatar
         );
@@ -600,15 +600,6 @@ pub async fn edit_group_metadata(ctx: &mut EchoContext) -> RouteResult<()> {
     tx.commit().await.context(E::Database)?;
 
     Ok(())
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SendGroupMessageData {
-    pub group_id: SnowflakeID,
-    pub replied_to: Option<SnowflakeID>,
-    pub message_body: Encrypted<MessageBody>,
-    pub message_key_for_others: MegolmMessage,
-    pub message_key_for_self: Encrypted<Secret>
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -622,6 +613,16 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
     let user = ctx.user.unwrap();
 
     let group_id: SnowflakeID = ctx.stream.receive().await?;
+
+    let is_group: Option<i32> = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT 1 FROM groups WHERE id = $1",
+        group_id
+    );
+
+    if is_group.is_none() {
+        bail!(E::Group(G::GroupNotFound));
+    }
 
     let current_epoch: i64 = fetch_one_scalar!(
         &ctx.pool,
@@ -656,8 +657,8 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
             .context(E::Database)?;
 
         let stmt = "
-            SELECT user_id FROM conversation_members
-            WHERE conversation_id = $1
+            SELECT user_id FROM group_members
+            WHERE group_id = $1
             AND user_id != $2
         ";
 
@@ -756,6 +757,15 @@ pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<
     Ok(())
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SendGroupMessageData {
+    pub group_id: SnowflakeID,
+    pub replied_to: Option<SnowflakeID>,
+    pub message_body: Encrypted<MessageBody>,
+    pub message_key_for_others: MegolmMessage,
+    pub message_key_for_self: Encrypted<Secret>
+}
+
 #[route("groups.messages.send")]
 pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Message> {
     let user = ctx.user.unwrap();
@@ -782,8 +792,8 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
     }
 
     let stmt = "
-        SELECT 1 FROM conversation_members
-        WHERE conversation_id = $1
+        SELECT 1 FROM group_members
+        WHERE group_id = $1
         AND user_id = $2
     ";
 
@@ -799,8 +809,8 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
     }
 
     let stmt = "
-        SELECT user_id FROM conversation_members
-        WHERE conversation_id = $1
+        SELECT user_id FROM group_members
+        WHERE group_id = $1
         AND user_id != $2
     ";
 
@@ -818,7 +828,7 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
     );
 
     let stmt = "
-        SELECT 1 FROM group_session_keys
+        SELECT 1 FROM session_keys
         WHERE group_id = $1
         AND sender_id = $2
         AND epoch = $3
@@ -848,10 +858,9 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
         INSERT INTO messages (
             id,
             parent_id,
-            conversation_id,
+            group_id,
             author_id,
             type,
-            sent_at,
             blob
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
     ";
@@ -869,7 +878,6 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
         group_id,
         user,
         message_type,
-        Utc::now(),
         &message_body
     );
 

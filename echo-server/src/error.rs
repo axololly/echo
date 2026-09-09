@@ -13,9 +13,6 @@ pub enum RouteError {
     #[error("invalid incoming data")]
     InvalidData,
 
-    #[error("user failed to authenticate themselves")]
-    UserAuthFailed,
-
     #[error("transport error")]
     Transport,
 

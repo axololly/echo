@@ -6,10 +6,10 @@ use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
 use vodozemac::megolm::{MegolmMessage, SessionKey};
 
-use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, ok, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, fetch_all_as, execute, ok, route, router::EchoContext};
 
 #[derive(Deserialize, Serialize)]
-pub struct InboxEntry {
+pub struct GroupInboxEntry {
     pub message_id: SnowflakeID,
     pub author_id: SnowflakeID,
     pub lookup: EchoLookupProof,
@@ -17,10 +17,8 @@ pub struct InboxEntry {
     pub megolm_message: MegolmMessage
 }
 
-// TODO: figure out how to recycle sessions that are no longer required
-// and figure out a more fitting name for the module this route will go in.
-#[route("conversations.messages.inbox")]
-pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
+#[route("inbox.groups")]
+pub async fn manage_group_message_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
     let per_page: i64 = 50;
@@ -54,7 +52,7 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
             offset
         );
 
-        let mut entries: Vec<InboxEntry> = vec![];
+        let mut entries: Vec<GroupInboxEntry> = vec![];
 
         for (message_id, author_id, session_key, megolm_msg) in rows {
             let lookup = ctx
@@ -63,7 +61,7 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
                 .await
                 .context(E::Database)?;
 
-            entries.push(InboxEntry {
+            entries.push(GroupInboxEntry {
                 message_id,
                 author_id,
                 lookup,
@@ -110,6 +108,19 @@ pub async fn manage_user_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
 
         offset += per_page;
     }
+
+    Ok(())
+}
+
+#[route("inbox.dms")]
+pub async fn manage_dm_message_inbox(ctx: &mut EchoContext) -> RouteResult<()> {
+    let stmt = "
+        SELECT
+            dms.blob AS session,
+            omk
+        FROM dm_sessions dms
+        INNER JOIN outgoing_dm_message_keys omk ON omk.
+    ";
 
     Ok(())
 }

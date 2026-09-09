@@ -1,6 +1,7 @@
+use rootcause::{compat::boxed_error::IntoBoxedError, report};
 use serde::{Deserialize, Serialize};
 use sqlx::{Decode, Encode, postgres::PgTypeInfo};
-use vodozemac::megolm::MegolmMessage;
+use vodozemac::{megolm::MegolmMessage, olm::{MessageType as OlmMessageType, OlmMessage}};
 
 use crate::{AssetID, Encrypted, Secret, SnowflakeID};
 
@@ -34,6 +35,58 @@ pub enum MessageType {
 impl sqlx::Type<sqlx::Postgres> for MessageType {
     fn type_info() -> PgTypeInfo {
         PgTypeInfo::with_name("\"MessageType\"")
+    }
+}
+
+pub struct SqlxOlmMessage(OlmMessage);
+
+impl From<SqlxOlmMessage> for OlmMessage {
+    fn from(value: SqlxOlmMessage) -> Self {
+        value.0
+    }
+}
+
+impl From<OlmMessage> for SqlxOlmMessage {
+    fn from(value: OlmMessage) -> Self {
+        Self(value)
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for SqlxOlmMessage {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let kind: u8 = match self.0.message_type() {
+            OlmMessageType::Normal => 0,
+            OlmMessageType::PreKey => 1
+        };
+
+        buf.extend_from_slice(&[kind]);
+        buf.extend_from_slice(self.0.message());
+
+        Ok(sqlx::encode::IsNull::No)
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Postgres> for SqlxOlmMessage {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = value.as_bytes()?;
+
+        let kind = bytes[0];
+        let ciphertext = &bytes[1..];
+
+        let msg = OlmMessage::from_parts(kind as usize, ciphertext)?;
+
+        Ok(Self(msg))
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for SqlxOlmMessage {
+    fn type_info() -> <sqlx::Postgres as sqlx::Database>::TypeInfo {
+        <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
     }
 }
 

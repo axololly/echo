@@ -172,13 +172,14 @@ impl EchoRouter {
             accept_friend_request
             reset_user_password
 
-            // Conversation routes
-            manage_user_inbox
-
             // AKD routes
             get_user_crypto_with_proof
             verify_user_crypto_history
             get_akd_public_key
+
+            // Inbox routes
+            manage_dm_message_inbox
+            manage_group_message_inbox
         };
 
         router

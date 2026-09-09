@@ -1,7 +1,7 @@
 use echo_types::{Signed, SnowflakeID};
 use rootcause::{bail, prelude::ResultExt};
 
-use crate::{error::{RouteError as E, RouteResult}, fetch_one_scalar};
+use crate::{error::{RouteError as E, RouteResult}, fetch_one_scalar, routes::UserRouteError};
 
 use crate::router::EchoContext;
 
@@ -38,7 +38,7 @@ pub async fn validate_user(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
     println!("[ authenticating as: {name} (resource: {:?}) -> {} ]", ctx.resource, signed_id.verify(verifier));
 
     if !signed_id.verify(verifier) {
-        bail!(E::UserAuthFailed);
+        bail!(E::User(UserRouteError::AuthFailed));
     }
 
     Ok(*id)

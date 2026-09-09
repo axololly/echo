@@ -1,14 +1,20 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
-use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, FriendRequest, OneTimeKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserCrypto, UserData, UserSettings};
+use echo_akd::EchoLookupProof;
+use echo_types::{Activity, CryptoBox, DEFAULT_PFP_ASSET_ID, Encrypted, FriendRequest, OneTimeKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, SqlxMegolmMessage, SqlxOlmMessage, User, UserCrypto, UserData, UserSettings};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use vodozemac::olm::AccountPickle;
+use vodozemac::{Curve25519PublicKey, megolm::{MegolmMessage, SessionKey}, olm::{AccountPickle, OlmMessage, SessionPickle}};
 
-use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_all_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_all_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
 
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum UserRouteError {
+    #[error("user failed to authenticate themselves")]
+    AuthFailed,
+
     #[error("username already taken")]
     UsernameAlreadyTaken,
 
@@ -17,6 +23,9 @@ pub enum UserRouteError {
 
     #[error("already sent a friend request to that user")]
     FriendRequestAlreadySent,
+
+    #[error("friend request not found")]
+    FriendRequestNotFound,
 
     #[error("cannot send a friend request to someone you are already friends with")]
     AlreadyFriends
@@ -74,7 +83,8 @@ pub struct CreateNewUserData {
     pub settings: Encrypted<UserSettings>,
     pub signature_verifier: SignatureVerifier,
     pub encryption_public_key: crypto_box::PublicKey,
-    pub olm_account: Encrypted<AccountPickle>
+    pub olm_account: Encrypted<AccountPickle>,
+    pub olm_one_time_keys: Vec<Curve25519PublicKey>
 }
 
 #[route("users.create")]
@@ -86,7 +96,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         settings,
         signature_verifier,
         encryption_public_key,
-        olm_account
+        olm_account,
+        olm_one_time_keys
     } = ctx
         .stream
         .receive()
@@ -154,6 +165,17 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &settings,
         &olm_account
     );
+
+    let stmt = "INSERT INTO users_one_time_keys (user_id, one_time_key) VALUES ($1, $2)";
+
+    for one_time_key in olm_one_time_keys {
+        execute!(
+            &mut *tx,
+            stmt,
+            user.id,
+            OneTimeKey::from(one_time_key)
+        );
+    }
 
     let crypto = UserCrypto {
         signature_verifier,
@@ -255,6 +277,12 @@ pub async fn create_new_friend_request(ctx: &mut EchoContext) -> RouteResult<Fri
     Ok(friend_request)
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateDirectMessageData {
+    pub encrypted_session: Encrypted<SessionPickle>,
+    pub pre_key_msg: OlmMessage
+}
+
 #[route("users.friends.requests.accept")]
 pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     let sender: SnowflakeID = ctx
@@ -263,6 +291,17 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         .await?;
 
     let recipient = ctx.user.unwrap();
+
+    let is_pending_friend_request: Option<i32> = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT 1 FROM friend_requests WHERE sender = $1 AND receiver = $2",
+        sender,
+        recipient
+    );
+
+    if is_pending_friend_request.is_none() {
+        bail!(E::User(U::FriendRequestNotFound));
+    }
 
     let mut tx = ctx
         .pool
@@ -277,19 +316,47 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         recipient
     );
 
+    let conversation_id = SNOWFLAKE_GEN.next();
+
     execute!(
         &mut *tx,
-        "INSERT INTO friendships (user1, user2, friends_since) VALUES ($1, $2, $3)",
+        "INSERT INTO conversations (id) VALUES ($1)",
+        conversation_id
+    );
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO friendships (user1, user2, conversation_id) VALUES ($1, $2, $3, $4)",
         sender.min(recipient),
         sender.max(recipient),
-        Utc::now()
+        conversation_id
+    );
+
+    let CreateDirectMessageData {
+        encrypted_session,
+        pre_key_msg
+    } = ctx
+        .stream
+        .receive()
+        .await?;
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO dm_sessions (conversation_id, user_id, blob) VALUES ($1, $2, $3)",
+        conversation_id,
+        recipient,
+        encrypted_session
+    );
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO outgoing_dm_message_keys (conversation_id, recipient_id, blob) VALUES ($1, $2, $3)",
+        conversation_id,
+        sender,
+        SqlxOlmMessage::from(pre_key_msg)
     );
 
     tx.commit().await.context(E::Database)?;
-
-    println!("[ added friendship ]");
-
-    // TODO: start a conversation here
 
     Ok(())
 }

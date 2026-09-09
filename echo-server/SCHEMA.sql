@@ -19,25 +19,45 @@ CREATE TABLE users (
 );
 
 CREATE TABLE users_data (
-    user_id INT8 REFERENCES users(id)
+    user_id INT8 PRIMARY KEY
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
     settings BYTEA NOT NULL,
 
-    olm_account BYTEA NOT NULL
+    olm_account BYTEA NOT NULL,
 );
 
+CREATE TABLE users_one_time_keys (
+    user_id INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    one_time_key BYTEA CHECK (length(one_time_key) = 32),
+
+    PRIMARY KEY (user_id, one_time_key)
+);
+
+CREATE INDEX idx_users_otks ON users_one_time_keys(one_time_key);
+
 CREATE TABLE friendships (
-    user1 INT8 REFERENCES users(id)
+    user1 INT8 NOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    user2 INT8 REFERENCES users(id)
+    user2 INT8 MNOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    friends_since TIMESTAMPTZ NOT NULL,
+    friends_since TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
 
     PRIMARY KEY (user1, user2),
 
@@ -45,19 +65,22 @@ CREATE TABLE friendships (
 );
 
 CREATE INDEX idx_friendships_user2 ON friendships(user2);
+CREATE INDEX idx_friendships_conversation_id ON friendships(conversation_id);
 
 CREATE TABLE friend_requests (
-    sender INT8 REFERENCES users(id)
+    sender INT8 NOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    receiver INT8 REFERENCES users(id)
+    receiver INT8 NOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
     one_time_key BYTEA CHECK (length(one_time_key) = 32),
 
-    sent_at TIMESTAMPTZ NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (sender, receiver)
 );
@@ -66,7 +89,7 @@ CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);
 
 CREATE TABLE conversations (
     id INT8 PRIMARY KEY,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE groups (
@@ -78,25 +101,27 @@ CREATE TABLE groups (
     name TEXT UNIQUE CHECK (char_length(name) <= 20),
     avatar "AssetID",
     invite_code VARCHAR(8) UNIQUE CHECK (invite_code ~ '^[A-Z0-9]+$'),
-    current_epoch INT8 NOT NULL CHECK (current_epoch >= 0)
+    current_epoch INT8 NOT NULL DEFAULT 0
+        CHECK (current_epoch >= 0)
 );
 
-CREATE TABLE conversation_members (
-    conversation_id INT8 NOT NULL
-        REFERENCES conversations(id)
+CREATE TABLE group_members (
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    user_id INT8 REFERENCES users(id)
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    joined_at TIMESTAMPTZ NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    PRIMARY KEY (conversation_id, user_id)
+    PRIMARY KEY (group_id, user_id)
 );
 
-CREATE INDEX idx_conversation_member_ids ON conversation_members(user_id);
+CREATE INDEX idx_group_member_ids ON group_members(user_id);
 
 CREATE TABLE group_members_banned (
     group_id INT8 NOT NULL
@@ -140,7 +165,7 @@ CREATE TABLE messages (
 
     type "MessageType" NOT NULL,
 
-    sent_at TIMESTAMPTZ NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     blob BYTEA NOT NULL
 );
@@ -189,32 +214,31 @@ CREATE INDEX idx_message_decryption_keys_id ON message_decryption_keys(message_i
 --         ON DELETE CASCADE,
 
 --     asset_id "AssetID",
-
 --     asset_key BYTEA NOT NULL,
 
 --     PRIMARY KEY (user_id, asset_id)
 -- );
 
--- These are Olm/Megolm messages containing decryption keys
+-- These are Megolm messages containing decryption keys
 -- that need to be added to the 'message_decryption_keys' table.
-CREATE TABLE outgoing_message_keys (
+CREATE TABLE outgoing_group_message_keys (
+    recipient_id INT8 NOT NULL,
+    epoch INT8 NOT NULL CHECK (epoch >= 0),
+
     message_id INT8 NOT NULL
         REFERENCES messages(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
-
-    recipient_id INT8 NOT NULL,
-
-    epoch INT8 NOT NULL CHECK (epoch >= 0),
 
     blob BYTEA NOT NULL,
 
     PRIMARY KEY (recipient_id, epoch, message_id)
 );
 
-CREATE INDEX idx_outgoing_messages_id ON outgoing_message_keys(message_id);
+CREATE INDEX idx_outgoing_keys_messages_id ON outgoing_group_message_keys(message_id);
 
 -- These are Megolm session keys used for transporting the message keys.
+-- TODO: recycle these when they are not needed
 CREATE TABLE group_session_keys (
     group_id INT8 NOT NULL
         REFERENCES groups(id)
@@ -239,3 +263,40 @@ CREATE TABLE group_session_keys (
 );
 
 CREATE INDEX idx_group_session_keys_recipient ON group_session_keys(recipient_id, group_id, epoch);
+
+CREATE TABLE dm_sessions (
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    blob BYTEA NOT NULL
+);
+
+CREATE INDEX idx_olm_sessions_user_id ON olm_sessions(user_id);
+
+CREATE TABLE outgoing_dm_message_keys (
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    recipient_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    message_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    blob BYTEA NOT NULL
+);
+
+CREATE INDEX idx_outgoing_dm_message_keys_recipient_id ON outgoing_dm_message_keys(recipient_id);
