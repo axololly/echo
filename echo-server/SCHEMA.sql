@@ -47,17 +47,12 @@ CREATE TABLE friendships (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    user2 INT8 MNOT NULL
+    user2 INT8 NOT NULL
         REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
     friends_since TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    conversation_id INT8 NOT NULL
-        REFERENCES conversations(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
 
     PRIMARY KEY (user1, user2),
 
@@ -65,7 +60,6 @@ CREATE TABLE friendships (
 );
 
 CREATE INDEX idx_friendships_user2 ON friendships(user2);
-CREATE INDEX idx_friendships_conversation_id ON friendships(conversation_id);
 
 CREATE TABLE friend_requests (
     sender INT8 NOT NULL
@@ -87,11 +81,6 @@ CREATE TABLE friend_requests (
 
 CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);
 
-CREATE TABLE conversations (
-    id INT8 PRIMARY KEY,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE groups (
     id INT8 PRIMARY KEY
         REFERENCES conversations(id)
@@ -102,7 +91,8 @@ CREATE TABLE groups (
     avatar "AssetID",
     invite_code VARCHAR(8) UNIQUE CHECK (invite_code ~ '^[A-Z0-9]+$'),
     current_epoch INT8 NOT NULL DEFAULT 0
-        CHECK (current_epoch >= 0)
+        CHECK (current_epoch >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE group_members (
@@ -145,16 +135,16 @@ CREATE TYPE "MessageType" AS ENUM(
     'Edit'
 );
 
-CREATE TABLE messages (
+CREATE TABLE group_messages (
     id INT8 PRIMARY KEY,
 
     parent_id INT8
         REFERENCES messages(id)
         ON UPDATE CASCADE
-        ON DELETE CASCADE,
+        ON DELETE SET NULL,
 
-    conversation_id INT8 NOT NULL
-        REFERENCES conversations(id)
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -170,8 +160,8 @@ CREATE TABLE messages (
     blob BYTEA NOT NULL
 );
 
-CREATE INDEX idx_messages_conversation_id ON messages(conversation_id, id);
-CREATE INDEX idx_messages_author_id ON messages(author_id);
+CREATE INDEX idx_group_messages_group_id ON group_messages(group_id, id);
+CREATE INDEX idx_group_messages_author_id ON group_messages(author_id);
 
 -- TODO: make this work too
 -- CREATE TABLE asset_decryption_keys (
@@ -195,10 +185,7 @@ CREATE TABLE message_decryption_keys (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    message_id INT8 NOT NULL
-        REFERENCES messages(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
+    message_id INT8 NOT NULL,
 
     blob BYTEA NOT NULL,
 
@@ -226,7 +213,7 @@ CREATE TABLE outgoing_group_message_keys (
     epoch INT8 NOT NULL CHECK (epoch >= 0),
 
     message_id INT8 NOT NULL
-        REFERENCES messages(id)
+        REFERENCES group_messages(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -264,25 +251,66 @@ CREATE TABLE group_session_keys (
 
 CREATE INDEX idx_group_session_keys_recipient ON group_session_keys(recipient_id, group_id, epoch);
 
-CREATE TABLE dm_sessions (
-    conversation_id INT8 NOT NULL
-        REFERENCES conversations(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
+CREATE TABLE dm_messages (
+    id INT8 PRIMARY KEY,
 
-    user_id INT8 NOT NULL
+    parent_id INT8
+        REFERENCES dm_messages(id)
+        ON UPDATE CASCADE
+        ON DELETE SET NULL,
+
+    sender_id INT8 NOT NULL
         REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
+    recipient_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    type "MessageType" NOT NULL,
+
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
     blob BYTEA NOT NULL
 );
 
-CREATE INDEX idx_olm_sessions_user_id ON olm_sessions(user_id);
+CREATE TABLE dm_sessions (
+    owner_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    other_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    blob BYTEA NOT NULL,
+
+    PRIMARY KEY (owner_id, other_id)
+);
+
+CREATE TABLE pending_dm_sessions (
+    waiting_on INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    initiator INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    pre_key_msg BYTEA NOT NULL,
+
+    PRIMARY KEY (waiting_on, initiator, pre_key_msg)
+);
 
 CREATE TABLE outgoing_dm_message_keys (
-    conversation_id INT8 NOT NULL
-        REFERENCES conversations(id)
+    sender_id INT8 NOT NULL
+        REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -292,7 +320,7 @@ CREATE TABLE outgoing_dm_message_keys (
         ON DELETE CASCADE,
 
     message_id INT8 NOT NULL
-        REFERENCES users(id)
+        REFERENCES dm_messages(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 

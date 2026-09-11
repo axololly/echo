@@ -855,7 +855,7 @@ pub async fn send_new_group_message(ctx: &mut EchoContext) -> RouteResult<Messag
     let message_id = SNOWFLAKE_GEN.next();
 
     let stmt = "
-        INSERT INTO messages (
+        INSERT INTO group_messages (
             id,
             parent_id,
             group_id,

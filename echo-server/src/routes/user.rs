@@ -316,20 +316,11 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         recipient
     );
 
-    let conversation_id = SNOWFLAKE_GEN.next();
-
     execute!(
         &mut *tx,
-        "INSERT INTO conversations (id) VALUES ($1)",
-        conversation_id
-    );
-
-    execute!(
-        &mut *tx,
-        "INSERT INTO friendships (user1, user2, conversation_id) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO friendships (user1, user2) VALUES ($1, $2)",
         sender.min(recipient),
-        sender.max(recipient),
-        conversation_id
+        sender.max(recipient)
     );
 
     let CreateDirectMessageData {
@@ -342,16 +333,16 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO dm_sessions (conversation_id, user_id, blob) VALUES ($1, $2, $3)",
-        conversation_id,
+        "INSERT INTO dm_sessions (owner_id, other_id, blob) VALUES ($1, $2, $3)",
         recipient,
+        sender,
         encrypted_session
     );
 
     execute!(
         &mut *tx,
-        "INSERT INTO outgoing_dm_message_keys (conversation_id, recipient_id, blob) VALUES ($1, $2, $3)",
-        conversation_id,
+        "INSERT INTO pending_dm_sessions (owner_id, other_id, pre_key_msg) VALUES ($1, $2, $3)",
+        recipient,
         sender,
         SqlxOlmMessage::from(pre_key_msg)
     );
