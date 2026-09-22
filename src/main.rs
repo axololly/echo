@@ -1,11 +1,25 @@
-use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, ExtensionList, client_builder::MlsConfig, group::{CommitOutput, ReceivedMessage}, identity::{SigningIdentity, basic::BasicIdentityProvider}};
+mod group_storage;
+use group_storage::MyGroupStorage;
+
+use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, ExtensionList, client_builder::{BaseConfig, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider}, group::{CommitOutput, ReceivedMessage}, identity::{SigningIdentity, basic::BasicIdentityProvider}};
 use mls_rs_core::identity::BasicCredential;
 use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 
 const CIPHER_SUITE: CipherSuite = CipherSuite::CURVE25519_CHACHA;
 
+type ClientConfig = WithGroupStateStorage<
+    MyGroupStorage,
+    WithCryptoProvider<
+        RustCryptoProvider,
+        WithIdentityProvider<
+            BasicIdentityProvider,
+            BaseConfig
+        >
+    >
+>;
+
 /// Create an MLS client where the identity is a given username.
-fn make_client(username: &str) -> Client<impl MlsConfig> {
+fn make_client(username: &str) -> Client<ClientConfig> {
     let credential = BasicCredential::new(username.as_bytes().to_vec());
 
     let (private_key, public_key) = RustCryptoProvider::new()
@@ -21,6 +35,7 @@ fn make_client(username: &str) -> Client<impl MlsConfig> {
 
     Client::builder()
         .crypto_provider(RustCryptoProvider::new())
+        .group_state_storage(MyGroupStorage::default()) // Use my custom group state storage
         .signing_identity(identity, private_key, CIPHER_SUITE)
         .identity_provider(BasicIdentityProvider::new())
         .build()
@@ -106,6 +121,12 @@ fn main() -> rootcause::Result<()> {
         },
         _ => println!("received different type of message: {received:?}")
     }
+
+    alice_group.write_to_storage()?;
+    bob_group.write_to_storage()?;
+
+    println!("alice group size: {}", alice.group_state_storage().serialized_size());
+    println!("bob group size: {}", bob.group_state_storage().serialized_size());
 
     Ok(())
 }
