@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rootcause = "0.13.0"
+vodozemac = "0.11.0"
