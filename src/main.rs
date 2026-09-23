@@ -1,7 +1,10 @@
 use std::marker::PhantomData;
 
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::Aead};
+use hex_literal::hex;
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::Sha256;
 
 /// A secret.
 ///
@@ -15,6 +18,20 @@ impl Secret {
     /// Generate a random secret.
     pub fn random() -> Self {
         Self(rand::random())
+    }
+
+    /// Derive a new cryptographically secure, but determinant, secret
+    /// from this secret and a label.
+    ///
+    /// The label is used to individualise each secret.
+    pub fn derive_new(&self, info: &str) -> Self {
+        let hkdf = Hkdf::<Sha256>::new(None, &self.0);
+
+        let mut out = [0; 32];
+
+        hkdf.expand(info.as_bytes(), &mut out).expect("HKDF failed");
+
+        Self(out)
     }
 
     /// Encrypt some data using this secret.
@@ -82,22 +99,14 @@ impl<T: DeserializeOwned + Serialize> Encrypted<T> {
 
 
 fn main() {
-    let secret = Secret::random();
+    let secret = Secret(hex!("4d331c19d8889e640325fad19e0d11dcf2ae5b649b48e72c8ad83d4b05bc9802"));
 
-    let message = "this is some data".to_string();
+    let encryption_secret = secret.derive_new("encryption");
 
-    let enc = secret.encrypt(&message);
+    assert_eq!(
+        encryption_secret.0, hex!("53d6935e82f8ba1550d98b8a45e362aa50473f4378c2928c8a38f9a6b1f05914"),
+        "HKDF was not deterministic"
+    );
 
-    let decrypted_message = secret.decrypt(&enc);
-
-    println!("message: {message:?}");
-    println!("decrypted message: {decrypted_message:?}");
-
-    let secret2 = Secret::random();
-
-    let decrypted_message2 = secret2
-        .decrypt(&enc)
-        .expect("failed to decrypt");
-
-    println!("decrypted message from another secret: {decrypted_message2:?}");
+    println!("Assertion passed.")
 }
