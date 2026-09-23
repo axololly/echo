@@ -1,65 +1,46 @@
-use vodozemac::olm::{Account, OlmMessage, SessionConfig as OlmSessionConfig};
+use vodozemac::megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig};
+
+const CONFIG: MegolmSessionConfig = MegolmSessionConfig::version_1();
 
 fn main() -> rootcause::Result<()> {
-    let alice = Account::new();
-    let mut bob = Account::new();
+    // A group session is a one-to-many method of communication.
+    // Alice's session does not know about Bob's session, and
+    // Bob's session does not know about Alice's session.
+    let mut alice_sender = GroupSession::new(CONFIG);
+    let mut bob_sender = GroupSession::new(CONFIG);
 
-    // One-time keys are used for Olm's 3DH, which lets two users have any number
-    // of unique channels between one another.
-    // Basic DH would only allow one session between two users, so it cannot be
-    // replaced if compromised.
-    let bob_otk = bob.generate_one_time_keys(1).created[0];
-
-    bob.mark_keys_as_published();
-
-    // Create a 1-on-1 session only on Alice's side.
-    let mut alice_session = alice.create_outbound_session(
-        OlmSessionConfig::version_1(),
-        bob.curve25519_key(),
-        bob_otk
-    )?;
-
-    // Create a pre-key message that Bob can use to complete his end of the 1-on-1 session.
-    let OlmMessage::PreKey(pre_key_msg) = alice_session.encrypt([])? else {
-        unreachable!()
-    };
-
-    // Bob can now receive messages from Alice
-    let mut bob_session = bob.create_inbound_session(
-        OlmSessionConfig::version_1(),
-        alice.curve25519_key(),
-        &pre_key_msg
-    )?.session;
-
-    // Alice decides to send Bob a message, and Bob reads it.
+    // Alice sends Bob a message.
     {
-        let alice_msg = alice_session.encrypt("hello bob")?;
+        // Alice creates the message to be sent
+        let alice_message = alice_sender.encrypt("hello bob");
 
-        let plaintext = bob_session.decrypt(&alice_msg)?;
+        // Bob needs Alice's session key to read her messages.
+        let mut bob_reads_alice = InboundGroupSession::new(
+            &alice_sender.session_key(),
+            CONFIG
+        );
 
-        let text = str::from_utf8(&plaintext)?;
+        // Bob reads what Alice sent.
+        let bob_received = bob_reads_alice.decrypt(&alice_message)?;
 
-        println!("(bob) alice said: {text:?}");
+        println!("(from alice) bob received: {:?}", str::from_utf8(&bob_received.plaintext)?);
     }
 
-    let bob_message = bob_session.encrypt("hello alice")?;
-
-    // Bob decides to send Alice a message, and Alice reads it.
+    // Bob sends Alice a message back.
     {
-        let plaintext = alice_session.decrypt(&bob_message)?;
+        // Bob creates the message to be sent
+        let bob_message = bob_sender.encrypt("hello alice");
 
-        let text = str::from_utf8(&plaintext)?;
+        // Alice needs Bob's session key to read her messages.
+        let mut alice_reads_bob = InboundGroupSession::new(
+            &bob_sender.session_key(),
+            CONFIG
+        );
 
-        println!("(alice) bob said: {text:?}");
-    }
+        // Alice reads what Bob sent.
+        let alice_received = alice_reads_bob.decrypt(&bob_message)?;
 
-    // Alice then tries to decrypt Bob's message again.
-    {
-        let plaintext = alice_session.decrypt(&bob_message)?;
-
-        let text = str::from_utf8(&plaintext)?;
-
-        println!("(alice 2) bob said: {text:?}");
+        println!("(from alice) bob received: {:?}", str::from_utf8(&alice_received.plaintext)?);
     }
 
     Ok(())
