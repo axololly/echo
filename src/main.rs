@@ -1,8 +1,11 @@
-use std::marker::PhantomData;
+#![allow(unused)]
+
+use std::{marker::PhantomData, ops::Deref};
 
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::Aead};
 use hex_literal::hex;
 use hkdf::Hkdf;
+use p256::{PublicKey, SecretKey, ecdsa::{Signature as RawSignature, SigningKey, signature::{Signer, Verifier}}};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
 
@@ -15,15 +18,14 @@ use sha2::Sha256;
 struct Secret([u8; 32]);
 
 impl Secret {
-    /// Generate a random secret.
+    /// Generate a random [`Secret`].
     pub fn random() -> Self {
         Self(rand::random())
     }
 
-    /// Derive a new cryptographically secure, but determinant, secret
-    /// from this secret and a label.
-    ///
-    /// The label is used to individualise each secret.
+    /// Derive a new cryptographically secure (but determinant) secret
+    /// from this secret and a label. The label is used to individualise
+    /// each secret.
     pub fn derive_new(&self, info: &str) -> Self {
         let hkdf = Hkdf::<Sha256>::new(None, &self.0);
 
@@ -34,14 +36,24 @@ impl Secret {
         Self(out)
     }
 
-    /// Encrypt some data using this secret.
+    /// Encrypt some data using this [`Secret`].
     pub fn encrypt<T: DeserializeOwned + Serialize>(&self, data: &T) -> Encrypted<T> {
         Encrypted::encrypt(data, *self)
     }
 
-    /// Decrypt an [`Encrypted`] struct using this secret.
+    /// Decrypt an [`Encrypted`] struct using this [`Secret`].
     pub fn decrypt<T: DeserializeOwned + Serialize>(&self, enc: &Encrypted<T>) -> Result<T, DecryptionError> {
         enc.decrypt(*self)
+    }
+
+    /// Sign some data using this [`Secret`].
+    pub fn sign<T: Serialize>(&self, data: T) -> Signed<T> {
+        Signed::new(data, *self)
+    }
+
+    /// Verify a [`Signed`] was created using this [`Secret`].
+    pub fn verify<T: Serialize>(&self, signed: &Signed<T>) -> bool {
+        signed.verify(*self)
     }
 }
 
@@ -97,16 +109,64 @@ impl<T: DeserializeOwned + Serialize> Encrypted<T> {
     }
 }
 
+/// A signed value, where the signature is computed based
+/// on the bytes outputted from serialising the value.
+///
+/// This also packages the original value.
+struct Signed<T> {
+    inner: T,
+    signature: RawSignature
+}
+
+impl<T: Serialize> Signed<T> {
+    /// Create a new signed value, using the secret as the signing key.
+    pub fn new(data: T, secret: Secret) -> Self {
+        let bytes = bitcode::serialize(&data)
+            .expect("failed to serialise");
+
+        let signing_key = SigningKey::from_bytes(&secret.0.into())
+            .expect("failed to create signing key from Secret");
+
+        let signature = signing_key.sign(&bytes);
+
+        Self {
+            inner: data,
+            signature
+        }
+    }
+
+    /// Verify that the given [`Secret`] was used to create this signature.
+    pub fn verify(&self, secret: Secret) -> bool {
+        let signing_key = SigningKey::from_bytes(&secret.0.into())
+            .expect("failed to create signing key from Secret");
+
+        let bytes = bitcode::serialize(&self.inner)
+            .expect("failed to serialise");
+
+        signing_key
+            .verifying_key()
+            .verify(&bytes, &self.signature)
+            .is_ok()
+    }
+}
+
+// Allows you to access the original value from outside
+impl<T> Deref for Signed<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
 
 fn main() {
     let secret = Secret(hex!("4d331c19d8889e640325fad19e0d11dcf2ae5b649b48e72c8ad83d4b05bc9802"));
 
-    let encryption_secret = secret.derive_new("encryption");
+    let num = 15;
 
-    assert_eq!(
-        encryption_secret.0, hex!("53d6935e82f8ba1550d98b8a45e362aa50473f4378c2928c8a38f9a6b1f05914"),
-        "HKDF was not deterministic"
-    );
+    let signed_num = secret.sign(num);
 
-    println!("Assertion passed.")
+    assert!(secret.verify(&signed_num));
+
+    println!("original number: {}", *signed_num);
 }
