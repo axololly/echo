@@ -1,12 +1,11 @@
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 
-use bb8_postgres::PostgresConnectionManager;
 use pgtemp::PgTempDB;
-use postgres_types::{FromSql, ToSql, Type as PgType, to_sql_checked};
 use rootcause::Result;
-use tokio_postgres::{Config, NoTls, Row, ToStatement};
+use sqlx::{Decode, Encode, postgres::{PgArgumentBuffer, PgConnectOptions, PgPoolOptions, Postgres}};
 
-#[derive(Debug, Eq, FromSql, PartialEq, ToSql)]
+#[derive(Debug, Eq, PartialEq, sqlx::Type)]
+#[sqlx(type_name = "\"Activity\"")]
 enum Activity {
     Online,
     Idle,
@@ -23,40 +22,36 @@ impl Display for AssetID {
     }
 }
 
-impl<'a> FromSql<'a> for AssetID {
-    fn accepts(ty: &PgType) -> bool {
-        matches!(*ty, PgType::TEXT | PgType::VARCHAR)
-    }
+impl Encode<'_, Postgres> for AssetID {
+    fn encode_by_ref(
+        &self,
+        buf: &mut PgArgumentBuffer
+    ) -> std::result::Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(hex::encode(self.0).as_bytes());
 
-    fn from_sql(
-        _: &PgType,
-        raw: &'a [u8]
-    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(sqlx::encode::IsNull::No)
+    }
+}
+
+impl Decode<'_, Postgres> for AssetID {
+    fn decode(
+        value: <Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let raw = value.as_bytes()?;
+
         let bytes = hex::decode(raw)?;
 
         match bytes.try_into() {
-            Ok(data) => Ok(Self(data)),
+            Ok(buf) => Ok(Self(buf)),
             Err(_) => Err("invalid byte length".into())
         }
     }
 }
 
-impl ToSql for AssetID {
-    fn accepts(ty: &PgType) -> bool {
-        ty.name() == "AssetID"
+impl sqlx::Type<Postgres> for AssetID {
+    fn type_info() -> <Postgres as sqlx::Database>::TypeInfo {
+        <String as sqlx::Type<Postgres>>::type_info()
     }
-
-    fn to_sql(
-        &self,
-        _: &PgType,
-        out: &mut tokio_postgres::types::private::BytesMut
-    ) -> std::result::Result<postgres_types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        out.extend_from_slice(hex::encode(self.0).as_bytes());
-
-        Ok(postgres_types::IsNull::No)
-    }
-
-    to_sql_checked!();
 }
 
 #[tokio::main]
@@ -66,22 +61,20 @@ async fn main() -> Result<()> {
             .with_bin_path("/usr/lib/postgresql/17/bin")
     );
 
-    let mut config = Config::new();
+    let options = PgConnectOptions::from_str(&temp.connection_uri())?
+        .statement_cache_capacity(0);
 
-    config.options(temp.connection_string());
-
-    let manager = PostgresConnectionManager::new(config, NoTls);
-
-    let pool = bb8::Pool::builder().build(manager).await?;
-
-    let schema = include_str!("../SCHEMA.sql");
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect_with(options)
+        .await?;
 
     {
-        let conn = pool.get().await?;
+        let schema = include_str!("../SCHEMA.sql");
 
-        conn.batch_execute(
-            include_str!("../SCHEMA.sql")
-        ).await?;
+        sqlx::raw_sql(schema)
+            .execute(&pool)
+            .await?;
     }
 
     let name = "james.hanley";
@@ -91,8 +84,6 @@ async fn main() -> Result<()> {
     let activity = Activity::Online;
 
     {
-        let conn = pool.get().await?;
-
         let stmt = "
             INSERT INTO users (
                 id,
@@ -103,23 +94,27 @@ async fn main() -> Result<()> {
             ) VALUES ($1, $2, $3, $4, $5)
         ";
 
-        conn.execute(
-            stmt,
-            &[&1i64, &name, &display_name, &avatar, &activity]
-        ).await?;
+        sqlx::query(stmt)
+            .bind(1i64)
+            .bind(name)
+            .bind(display_name)
+            .bind(avatar)
+            .bind(&activity)
+            .execute(&pool)
+            .await?;
     }
 
-    let conn = pool.get().await?;
+    let stmt = "SELECT name, display_name, avatar, activity FROM users WHERE id = $1";
 
-    let row: Row = conn.query_one(
-        "SELECT name, display_name, avatar, activity FROM users WHERE id = $1",
-        &[&1i64]
-    ).await?;
-
-    let name2: String = row.get(0);
-    let display_name2: String = row.get(1);
-    let avatar2: AssetID = row.get(2);
-    let activity2: Activity = row.get(3);
+    let (name2, display_name2, avatar2, activity2): (
+        String,
+        String,
+        AssetID,
+        Activity
+    ) = sqlx::query_as(stmt)
+        .bind(1i64)
+        .fetch_one(&pool)
+        .await?;
 
     assert_eq!(name, name2, "names differed: {name} vs {name2}");
     assert_eq!(display_name, display_name2, "display names differed: {display_name} vs {display_name2}");
