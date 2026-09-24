@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+hex = "0.4.3"
+pgtemp = "0.7.1"
+postgres-types = { version = "0.2.14", features = ["derive"] }
+rand = "0.10.3"
+rootcause = "0.13.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-postgres = "0.7.18"
