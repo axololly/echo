@@ -1,9 +1,10 @@
 use std::fmt::Display;
 
+use bb8_postgres::PostgresConnectionManager;
 use pgtemp::PgTempDB;
 use postgres_types::{FromSql, ToSql, Type as PgType, to_sql_checked};
 use rootcause::Result;
-use tokio_postgres::{NoTls, Row, ToStatement};
+use tokio_postgres::{Config, NoTls, Row, ToStatement};
 
 #[derive(Debug, Eq, FromSql, PartialEq, ToSql)]
 enum Activity {
@@ -65,32 +66,23 @@ async fn main() -> Result<()> {
             .with_bin_path("/usr/lib/postgresql/17/bin")
     );
 
-    let (client, connection) = tokio_postgres::connect(
-        &temp.connection_string(),
-        NoTls
-    ).await?;
+    let mut config = Config::new();
 
-    tokio::spawn(async {
-        if let Err(e) = connection.await {
-            println!("connection error: {e:?}");
-        }
-    });
+    config.options(temp.connection_string());
+
+    let manager = PostgresConnectionManager::new(config, NoTls);
+
+    let pool = bb8::Pool::builder().build(manager).await?;
 
     let schema = include_str!("../SCHEMA.sql");
 
-    client.batch_execute(
-        include_str!("../SCHEMA.sql")
-    ).await?;
+    {
+        let conn = pool.get().await?;
 
-    let stmt = "
-        INSERT INTO users (
-            id,
-            name,
-            display_name,
-            avatar,
-            activity
-        ) VALUES ($1, $2, $3, $4, $5)
-    ";
+        conn.batch_execute(
+            include_str!("../SCHEMA.sql")
+        ).await?;
+    }
 
     let name = "james.hanley";
     let display_name = "James Hanley";
@@ -98,12 +90,28 @@ async fn main() -> Result<()> {
     let avatar = AssetID(rand::random());
     let activity = Activity::Online;
 
-    client.execute(
-        stmt,
-        &[&1i64, &name, &display_name, &avatar, &activity]
-    ).await?;
+    {
+        let conn = pool.get().await?;
 
-    let row: Row = client.query_one(
+        let stmt = "
+            INSERT INTO users (
+                id,
+                name,
+                display_name,
+                avatar,
+                activity
+            ) VALUES ($1, $2, $3, $4, $5)
+        ";
+
+        conn.execute(
+            stmt,
+            &[&1i64, &name, &display_name, &avatar, &activity]
+        ).await?;
+    }
+
+    let conn = pool.get().await?;
+
+    let row: Row = conn.query_one(
         "SELECT name, display_name, avatar, activity FROM users WHERE id = $1",
         &[&1i64]
     ).await?;
