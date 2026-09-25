@@ -1,10 +1,19 @@
+mod router;
+// ...
+
+mod server;
+use server::run_server;
+
+mod stream;
+use stream::Stream;
+
 use std::{fmt::Debug, net::{SocketAddr, ToSocketAddrs}, sync::Arc};
 
-use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt, crypto::rustls::{QuicClientConfig, QuicServerConfig}, rustls::{ClientConfig as RustlsClientConfig, RootCertStore, ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject}}};
+use quinn::{ClientConfig, Connection, Endpoint, crypto::rustls::QuicClientConfig, rustls::{ClientConfig as RustlsClientConfig, RootCertStore, pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject}}};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::{router::Router, server::EchoRoute};
 
 fn into_socket_addrs(addr: impl ToSocketAddrs + Debug) -> Result<SocketAddr, &'static str> {
     addr.to_socket_addrs()
@@ -51,118 +60,6 @@ async fn connect_to_server(
     Ok(connection)
 }
 
-async fn run_server(
-    server_addr: impl ToSocketAddrs + Debug,
-    max_connections: usize,
-    cert: CertificateDer<'static>,
-    key: PrivateKeyDer<'static>
-) -> Result<()> {
-    let mut crypto = RustlsServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert], key)?;
-
-    crypto.alpn_protocols = vec![b"hq-29".to_vec()];
-
-    let mut config = ServerConfig::with_crypto(
-        Arc::new(QuicServerConfig::try_from(crypto).unwrap())
-    );
-
-    let transport = Arc::get_mut(&mut config.transport).unwrap();
-
-    transport.max_idle_timeout(Some(VarInt::from_u32(30_000).into()));
-
-    let endpoint = Endpoint::server(config, into_socket_addrs(server_addr)?)?;
-
-    while let Some(inc) = endpoint.accept().await {
-        if endpoint.open_connections() >= max_connections {
-            inc.refuse();
-            continue;
-        }
-
-        // TODO: check for blacklisted IPs here and refuse any that are
-
-        if inc.remote_address_validated() {
-            inc.retry()?;
-            continue;
-        }
-
-        let conn = inc.await?;
-
-        tokio::spawn(handle_streams(conn));
-    }
-
-    Ok(())
-}
-
-struct Stream {
-    sender: SendStream,
-    receiver: RecvStream
-}
-
-impl Stream {
-    pub fn new(sender: SendStream, receiver: RecvStream) -> Self {
-        Self { sender, receiver }
-    }
-
-    pub async fn send<T: Serialize>(&mut self, data: &T) -> Result<()> {
-        let bytes = bitcode::serialize(data)?;
-
-        self.sender.write_u64_le(bytes.len() as u64).await?;
-
-        self.sender.write_all(&bytes).await?;
-
-        Ok(())
-    }
-
-    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T> {
-        let len = self.receiver.read_u64_le().await?;
-        let buf = &mut vec![0u8; len as usize];
-
-        self.receiver.read_exact(buf).await?;
-
-        let obj = bitcode::deserialize(buf)?;
-
-        Ok(obj)
-    }
-
-    pub fn close(mut self) -> Result<()> {
-        self.sender.finish()?;
-        self.receiver.stop(0_u32.into())?;
-
-        Ok(())
-    }
-}
-
-async fn handle_streams(conn: Connection) {
-    loop {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(stream) => stream,
-            Err(e) => {
-                println!("Error handling streams on server: {e:?}");
-                continue;
-            }
-        };
-
-        let stream = Stream::new(send, recv);
-
-        if let Err(e) = handle_single_stream(stream).await {
-            println!("Error with stream on server: {e:?}")
-        }
-    }
-}
-
-async fn handle_single_stream(mut stream: Stream) -> Result<()> {
-    let data: String = stream.receive().await?;
-
-    if data == "echo" {
-        stream.send(&data).await?;
-    }
-
-    stream.close()?;
-
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let CertifiedKey { cert, signing_key } = generate_simple_self_signed(vec![
@@ -178,11 +75,16 @@ async fn main() -> Result<()> {
     let client_addr = "localhost:6453";
     let server_addr = "localhost:4433";
 
+    let mut router = Router::default();
+
+    router.register(EchoRoute);
+
     tokio::spawn(run_server(
         server_addr,
         10,
         server_cert.clone(),
-        server_key
+        server_key,
+        Arc::new(router)
     ));
 
     let conn = connect_to_server(

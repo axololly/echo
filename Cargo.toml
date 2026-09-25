@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-trait = "0.1.92"
 bitcode = { version = "0.6.9", features = ["serde"] }
 quinn = "0.11.12"
 rcgen = "0.14.10"
