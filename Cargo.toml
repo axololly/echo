@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitcode = { version = "0.6.9", features = ["serde"] }
 quinn = "0.11.12"
 rcgen = "0.14.10"
 rootcause = "0.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["full"] }
 webpki-roots = "1.0.9"
