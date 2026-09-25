@@ -1,8 +1,12 @@
+mod varint;
+use varint::{AsyncVarintReader, AsyncVarintWriter};
+
 use std::{fmt::Debug, net::{SocketAddr, ToSocketAddrs}, sync::Arc, time::Duration};
 
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt, crypto::rustls::{QuicClientConfig, QuicServerConfig}, rustls::{ClientConfig as RustlsClientConfig, RootCertStore, ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject}}};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
+use serde::{Serialize, de::DeserializeOwned};
 
 fn into_socket_addrs(addr: impl ToSocketAddrs + Debug) -> Result<SocketAddr, &'static str> {
     addr.to_socket_addrs()
@@ -100,6 +104,46 @@ async fn run_server(
     Ok(())
 }
 
+struct Stream {
+    sender: SendStream,
+    receiver: RecvStream
+}
+
+impl Stream {
+    pub fn new(sender: SendStream, receiver: RecvStream) -> Self {
+        Self { sender, receiver }
+    }
+
+    pub async fn send<T: Serialize>(&mut self, data: &T) -> Result<()> {
+        let bytes = bitcode::serialize(data)?;
+
+        self.sender.write_varint(bytes.len() as u64).await?;
+
+        self.sender.write_all(&bytes).await?;
+
+        Ok(())
+    }
+
+    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T> {
+        let len: u64 = self.receiver.read_varint().await?;
+
+        let buf = &mut vec![0u8; len as usize];
+
+        self.receiver.read_exact(buf).await?;
+
+        let obj = bitcode::deserialize(buf)?;
+
+        Ok(obj)
+    }
+
+    pub fn close(mut self) -> Result<()> {
+        self.sender.finish()?;
+        self.receiver.stop(0_u32.into())?;
+
+        Ok(())
+    }
+}
+
 async fn handle_streams(conn: Connection) {
     loop {
         let (send, recv) = match conn.accept_bi().await {
@@ -110,29 +154,24 @@ async fn handle_streams(conn: Connection) {
             }
         };
 
+        let stream = Stream::new(send, recv);
+
         tokio::spawn(async {
-            if let Err(e) = handle_single_stream(send, recv).await {
+            if let Err(e) = handle_single_stream(stream).await {
                 println!("Error with stream on server: {e:?}")
             }
         });
     }
 }
 
-async fn handle_single_stream(mut send: SendStream, mut recv: RecvStream) -> Result<()> {
-    let buf = &mut [0u8; 4];
+async fn handle_single_stream(mut stream: Stream) -> Result<()> {
+    let data: String = stream.receive().await?;
 
-    recv.read_exact(buf).await?;
-
-    let error_code: u32 = if buf == b"echo" {
-        send.write_all(b"echo").await?;
-        0
+    if data == "echo" {
+        stream.send(&data).await?;
     }
-    else {
-        1
-    };
 
-    send.finish()?;
-    recv.stop(error_code.into())?;
+    stream.close()?;
 
     Ok(())
 }
@@ -165,17 +204,14 @@ async fn main() -> Result<()> {
         server_cert
     ).await?;
 
-    let (mut send, mut recv) = conn.open_bi().await?;
+    let (send, recv) = conn.open_bi().await?;
+    let mut stream = Stream::new(send, recv);
 
-    send.write_all(b"echo").await?;
+    stream.send(&"echo").await?;
 
-    let buf = &mut [0u8; 4];
+    let response: String = stream.receive().await?;
 
-    recv.read_exact(buf).await?;
-
-    let strbuf = str::from_utf8(buf)?;
-
-    println!("response from server: {strbuf:?}");
+    println!("response from server: {response:?}");
 
     Ok(())
 }
