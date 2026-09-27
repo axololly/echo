@@ -43,6 +43,33 @@ impl sqlx::Type<sqlx::Postgres> for AssetID {
     }
 }
 
+impl sqlx::Encode<'_, sqlx::Postgres> for AssetID {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let hex_repr = hex::encode(self.0);
+
+        buf.extend_from_slice(hex_repr.as_bytes());
+
+        Ok(sqlx::encode::IsNull::No)
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Postgres> for AssetID {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = value.as_bytes()?;
+
+        let out = &mut [0; 32];
+
+        hex::decode_to_slice(bytes, out)?;
+
+        Ok(Self(*out))
+    }
+}
+
 impl AssetID {
     /// Build an [`AssetID`] from a byte array.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {

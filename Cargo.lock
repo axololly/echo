@@ -479,6 +479,7 @@ dependencies = [
  "async-trait",
  "bitcode",
  "chrono",
+ "echo-server-derive",
  "echo-types",
  "quinn",
  "rootcause",
@@ -486,6 +487,14 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "echo-server-derive"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
