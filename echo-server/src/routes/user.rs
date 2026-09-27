@@ -1,4 +1,4 @@
-use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SnowflakeID, User, UserState};
+use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserState};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -8,6 +8,9 @@ use crate::{error::{RouteError as E, RouteResult}, execute, fetch_opt, fetch_opt
 /// An error that specifically occurred in one of the routes in this module.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum UserRouteError {
+    #[error("authentication failed")]
+    AuthenticationFailed,
+
     #[error("username already taken")]
     UsernameAlreadyTaken,
 
@@ -18,6 +21,7 @@ pub enum UserRouteError {
 use UserRouteError as U;
 
 #[route("users.get")]
+#[no_auth]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
         .stream
@@ -34,7 +38,8 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
             about_me,
             status,
             encrypted_secret,
-            encrypted_state
+            encrypted_state,
+            signature_verifier
         FROM users
         WHERE id = $1
     ";
@@ -53,15 +58,18 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
 pub struct CreateNewUserData {
     pub username: String,
     pub secret: PasswordProtected<Secret>,
-    pub state: Encrypted<UserState>
+    pub state: Encrypted<UserState>,
+    pub signature_verifier: SignatureVerifier
 }
 
 #[route("users.create")]
+#[no_auth]
 pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let CreateNewUserData {
         username,
         secret,
-        state
+        state,
+        signature_verifier
     } = ctx
         .stream
         .receive()
@@ -89,7 +97,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         about_me: String::new(),
         status: String::new(),
         secret,
-        state
+        state,
+        signature_verifier
     };
 
     let stmt = "
@@ -102,8 +111,9 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
             about_me,
             status,
             encrypted_secret,
-            encrypted_state
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            encrypted_state,
+            signature_verifier
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     ";
 
     // Add the user account to the database.
@@ -118,7 +128,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.about_me,
         &user.status,
         &user.secret,
-        &user.state
+        &user.state,
+        &user.signature_verifier
     );
 
     Ok(user)

@@ -133,7 +133,8 @@ async fn main() -> Result<()> {
                 enable_typing_indicators: true,
                 ignore_future_requests_from: vec![]
             }
-        })
+        }),
+        signature_verifier: secret.into()
     };
 
     stream.send(&data).await?;
