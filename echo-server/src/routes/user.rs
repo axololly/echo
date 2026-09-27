@@ -8,6 +8,9 @@ use crate::{error::{RouteError as E, RouteResult}, execute, fetch_opt, fetch_opt
 /// An error that specifically occurred in one of the routes in this module.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum UserRouteError {
+    #[error("authentication failed")]
+    AuthenticationFailed,
+
     #[error("username already taken")]
     UsernameAlreadyTaken,
 
@@ -18,6 +21,7 @@ pub enum UserRouteError {
 use UserRouteError as U;
 
 #[route("users.get")]
+#[no_auth]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
         .stream
@@ -59,6 +63,7 @@ pub struct CreateNewUserData {
 }
 
 #[route("users.create")]
+#[no_auth]
 pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let CreateNewUserData {
         username,

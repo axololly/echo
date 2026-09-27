@@ -1,3 +1,4 @@
+pub(crate) mod auth;
 pub mod stream;
 pub mod error;
 pub mod router;
