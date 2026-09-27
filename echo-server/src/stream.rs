@@ -11,12 +11,12 @@ use crate::error::{RouteError, RouteResult};
 /// Data is sent and received as length-prefixed
 /// linear streams of bytes that are deserialised
 /// and serialised respectively into expected types.
-pub struct Connection {
+pub struct Stream {
     sender: quinn::SendStream,
     receiver: quinn::RecvStream
 }
 
-impl Connection {
+impl Stream {
     /// Open a bidirectional stream using the given QUIC connection.
     pub async fn open_bi(parent: &quinn::Connection) -> Result<Self> {
         let (sender, receiver) = parent.open_bi().await?;
@@ -73,7 +73,8 @@ impl Connection {
             .attach("while receiving main content")?;
 
         let value = bitcode::deserialize(&bytes)
-            .context(RouteError::InvalidData)?;
+            .context(RouteError::InvalidData)
+            .attach(format!("while deserialising data to type {}", std::any::type_name::<T>()))?;
 
         Ok(value)
     }

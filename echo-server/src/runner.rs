@@ -5,7 +5,7 @@ use sqlx::postgres::PgPool;
 
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 
-use crate::{connection::Connection, router::{EchoContext, EchoRouter}};
+use crate::{router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -83,17 +83,18 @@ async fn handle_incoming_requests(
     pool: PgPool
 ) -> Result<()> {
     loop {
-        let mut conn = Connection::accept_bi(&parent).await?;
+        let mut stream = Stream::accept_bi(&parent).await?;
 
-        let route_name: String = conn.receive().await?;
+        let route_name: String = stream.receive().await?;
 
         let ctx = EchoContext {
             route_name,
-            conn,
+            stream,
             pool: pool.clone()
         };
 
         if let Err(report) = router.run_with(ctx).await {
+            // For debug purposes
             println!("Error encountered on server: {report:?}");
         }
     }

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use sqlx::postgres::PgPool;
 
-use crate::{connection::Connection, error::{RouteError, RouteResult}};
+use crate::{error::{RouteError, RouteResult}, stream::Stream};
 
 /// A route that a client can take through the API.
 ///
@@ -30,7 +30,7 @@ pub trait EchoRoute: Send + Sync + 'static {
 pub struct EchoContext {
     pub route_name: String,
     pub pool: PgPool,
-    pub conn: Connection
+    pub stream: Stream
 }
 
 /// A mapping of route names to route objects themselves.
@@ -63,7 +63,7 @@ impl EchoRouter {
         match self.routes.get(ctx.route_name.as_str()) {
             Some(route) => route.callback(&mut ctx).await?,
             None => {
-                ctx.conn.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
+                ctx.stream.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
             }
         };
 

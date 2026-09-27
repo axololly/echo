@@ -20,7 +20,7 @@ use UserRouteError as U;
 #[route("users.get")]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
-        .conn
+        .stream
         .receive()
         .await?;
 
@@ -66,7 +66,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         state,
         signature_verifier
     } = ctx
-        .conn
+        .stream
         .receive()
         .await?;
 
