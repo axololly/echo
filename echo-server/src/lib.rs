@@ -1,6 +1,7 @@
 pub mod error;
 pub mod router;
 pub mod routes;
+pub mod runner;
 pub mod stream;
 
 mod macros;
