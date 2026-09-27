@@ -1,12 +1,17 @@
 use quinn::VarInt;
-use rootcause::Result;
+use rootcause::{Result, prelude::ResultExt};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::varint::{AsyncVarintReader, AsyncVarintWriter};
 
+use crate::error::{RouteError, RouteResult};
+
 /// A wrapper over a QUIC stream that allows for
-/// sending and receiving complex data structures, as
-/// opposed to linear streams of bytes.
+/// sending and receiving complex data structures.
+///
+/// Data is sent and received as length-prefixed
+/// linear streams of bytes that are deserialised
+/// and serialised respectively into expected types.
 pub struct Connection {
     sender: quinn::SendStream,
     receiver: quinn::RecvStream
@@ -28,24 +33,48 @@ impl Connection {
     }
 
     /// Send some data over this [`Connection`].
-    pub async fn send<T: Serialize>(&mut self, data: &T) -> Result<()> {
-        let bytes = bitcode::serialize(data)?;
+    pub async fn send<T: Serialize>(&mut self, data: &T) -> RouteResult<()> {
+        let bytes = bitcode::serialize(data)
+            .context(RouteError::Transport)
+            .attach(format!("while serialising data of type {}", std::any::type_name::<T>()))?;
 
-        self.sender.write_varint(bytes.len() as u64).await?;
-        self.sender.write_all(&bytes).await?;
+        self
+            .sender
+            .write_varint(bytes.len() as u64)
+            .await
+            .context(RouteError::Transport)
+            .attach("while writing length")?;
+
+        self
+            .sender
+            .write_all(&bytes)
+            .await
+            .context(RouteError::Transport)
+            .attach("while writing main data")?;
 
         Ok(())
     }
 
     /// Receive some data over this [`Connection`].
-    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T> {
-        let len = self.receiver.read_varint().await?;
+    pub async fn receive<T: DeserializeOwned>(&mut self) -> RouteResult<T> {
+        let len = self
+            .receiver
+            .read_varint()
+            .await
+            .context(RouteError::Transport)
+            .attach("while receiving length")?;
 
         let mut bytes = vec![0u8; len as usize];
 
-        self.receiver.read_exact(&mut bytes).await?;
+        self
+            .receiver
+            .read_exact(&mut bytes)
+            .await
+            .context(RouteError::Transport)
+            .attach("while receiving main content")?;
 
-        let value = bitcode::deserialize(&bytes)?;
+        let value = bitcode::deserialize(&bytes)
+            .context(RouteError::InvalidData)?;
 
         Ok(value)
     }
