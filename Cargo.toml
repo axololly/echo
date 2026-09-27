@@ -2,5 +2,6 @@
 resolver = "3"
 members = [
     "echo-server",
+    "echo-server-derive",
     "echo-types"
 ]

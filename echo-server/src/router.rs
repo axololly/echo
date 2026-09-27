@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use rootcause::Result;
 use sqlx::postgres::PgPool;
 
 use crate::{connection::Connection, error::{RouteError, RouteResult}};
@@ -29,7 +28,7 @@ pub trait EchoRoute: Send + Sync + 'static {
 /// Contextual information necessary for individual routes
 /// to operate correctly.
 pub struct EchoContext {
-    pub resource: String,
+    pub route_name: String,
     pub pool: PgPool,
     pub conn: Connection
 }
@@ -46,14 +45,22 @@ impl EchoRouter {
     /// This is going to be supplied with all the implemented routes
     /// for the Echo server.
     pub fn new() -> Self {
-        Self::default()
+        let mut router = Self::default();
+
+        use crate::routes::*;
+
+        // User routes
+        router.register_route(get_user);
+        router.register_route(create_new_user);
+
+        router
     }
 
     /// Use the following [`EchoContext`] on this router by either
     /// redirecting execution to the correct callback, or sending
     /// back an error message.
-    pub async fn run_with(&self, mut ctx: EchoContext) -> Result<()> {
-        match self.routes.get(ctx.resource.as_str()) {
+    pub async fn run_with(&self, mut ctx: EchoContext) -> RouteResult<()> {
+        match self.routes.get(ctx.route_name.as_str()) {
             Some(route) => route.callback(&mut ctx).await?,
             None => {
                 ctx.conn.send(&Err::<(), _>(RouteError::UnknownResource)).await?;

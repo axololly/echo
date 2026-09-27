@@ -83,6 +83,14 @@ impl From<Secret> for VerifyingKey {
     }
 }
 
+impl From<Secret> for SignatureVerifier {
+    fn from(value: Secret) -> Self {
+        let verifying_key: VerifyingKey = value.into();
+
+        SignatureVerifier(verifying_key)
+    }
+}
+
 pub const NONCE_SIZE: usize = 24;
 
 /// An encrypted wrapper of some data.

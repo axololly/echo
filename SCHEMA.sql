@@ -1,4 +1,6 @@
-CREATE TYPE "Activity" AS ENUM(
+ -- TODO: add length checks to BYTEA columns
+
+ CREATE TYPE "Activity" AS ENUM(
     'Online',
     'Idle',
     'DoNotDisturb',
@@ -15,7 +17,7 @@ CREATE TABLE users (
     activity "Activity",
     about_me TEXT CHECK (char_length(about_me) <= 2000),
     status TEXT CHECK (char_length(status) <= 200),
-    encrypted_secret BYTEA, -- TODO: add length check
+    encrypted_secret BYTEA,
     encrypted_state BYTEA,
-    signature_verifier BYTEA CHECK (length(signature_verifier) = 32)
+    signature_verifier BYTEA
 );
