@@ -329,6 +329,45 @@ impl<T> sqlx::Type<sqlx::Postgres> for PasswordProtected<T> {
     }
 }
 
+/// A [`sqlx`]-compliant wrapper around [`p256`]'s [`VerifyingKey`] type.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[repr(transparent)]
+pub struct SignatureVerifier(pub VerifyingKey);
+
+impl sqlx::Encode<'_, sqlx::Postgres> for SignatureVerifier {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+    ) -> StdResult<IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(&self.0.to_sec1_bytes());
+
+        Ok(IsNull::No)
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Postgres> for SignatureVerifier {
+    fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>) -> StdResult<Self, sqlx::error::BoxDynError> {
+        let key = VerifyingKey::from_sec1_bytes(value.as_bytes()?)?;
+
+        Ok(Self(key))
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for SignatureVerifier {
+    fn type_info() -> <sqlx::Postgres as sqlx::Database>::TypeInfo {
+        <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+}
+
+impl From<Secret> for SignatureVerifier {
+    fn from(value: Secret) -> Self {
+        let signing_key = SigningKey::from_bytes(&value.0.into())
+            .expect("secret could not be used as a signing key");
+
+        Self(*signing_key.verifying_key())
+    }
+}
+
 /// A value with a signature appended.
 ///
 /// The original data is still recoverable through
