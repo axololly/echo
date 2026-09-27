@@ -1,4 +1,7 @@
+use std::sync::LazyLock;
+
 use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SnowflakeID, User, UserState};
+use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -8,12 +11,21 @@ use crate::{error::{RouteError as E, RouteResult}, execute, fetch_opt, fetch_opt
 /// An error that specifically occurred in one of the routes in this module.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum UserRouteError {
+    #[error("invalid usernames")]
+    InvalidUsername,
+
     #[error("username already taken")]
     UsernameAlreadyTaken,
 
     #[error("no user with that ID")]
     UserNotFound
 }
+
+// Regex to match a valid username
+pub static VALID_USERNAME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new("^[a-zA-Z0-9_-]{3,20}$")
+        .expect("failed to compile username regex")
+});
 
 use UserRouteError as U;
 
@@ -66,6 +78,10 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         .stream
         .receive()
         .await?;
+
+    if !VALID_USERNAME_REGEX.is_match(&username) {
+        bail!(E::User(U::InvalidUsername));
+    }
 
     // Check if the username is already taken
     let row = fetch_opt!(
