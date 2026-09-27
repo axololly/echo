@@ -1,11 +1,11 @@
 use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 
-use rootcause::{Result, compat::boxed_error::IntoBoxedError, option_ext::OptionExt};
+use rootcause::{Result, option_ext::OptionExt};
 use sqlx::postgres::PgPool;
 
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 
-use crate::{connection::Connection, router::{EchoContext, EchoRouter}};
+use crate::{router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -83,13 +83,13 @@ async fn handle_incoming_requests(
     pool: PgPool
 ) -> Result<()> {
     loop {
-        let mut conn = Connection::accept_bi(&parent).await?;
+        let mut stream = Stream::accept_bi(&parent).await?;
 
-        let route_name: String = conn.receive().await?;
+        let route_name: String = stream.receive().await?;
 
         let mut ctx = EchoContext {
             route_name,
-            conn,
+            stream,
             pool: pool.clone()
         };
 
@@ -101,6 +101,6 @@ async fn handle_incoming_requests(
 
         let stripped = result.map_err(|report| report.into_current_context());
 
-        ctx.conn.send(&stripped).await?;
+        ctx.stream.send(&stripped).await?;
     }
 }

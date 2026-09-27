@@ -5,7 +5,7 @@ use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
-use echo_server::{connection::Connection, error::RouteError, router::EchoRouter, runner::run, routes::CreateNewUserData};
+use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
 use echo_types::{PasswordProtected, Secret, User, UserSettings, UserState};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
 
@@ -115,10 +115,10 @@ async fn main() -> Result<()> {
     ).await?;
 
     // Connect to the API
-    let mut conn = Connection::open_bi(parent).await?;
+    let mut stream = Stream::open_bi(parent).await?;
 
     // Choose to create a user account
-    conn.send(&"users.create").await?;
+    stream.send(&"users.create").await?;
 
     let secret = Secret::random();
     let password = "6767";
@@ -137,23 +137,23 @@ async fn main() -> Result<()> {
         signature_verifier: secret.into()
     };
 
-    conn.send(&data).await?;
+    stream.send(&data).await?;
 
-    let maybe_user: std::result::Result<User, RouteError> = conn.receive().await?;
+    let maybe_user: std::result::Result<User, RouteError> = stream.receive().await?;
 
     let user = maybe_user?;
 
-    conn.close()?;
+    stream.close()?;
 
     // Open a new connection to the API
-    conn = Connection::open_bi(parent).await?;
+    stream = Stream::open_bi(parent).await?;
 
     // Choose to get a user account instead
-    conn.send(&"users.get").await?;
+    stream.send(&"users.get").await?;
 
-    conn.send(&user.id).await?;
+    stream.send(&user.id).await?;
 
-    let maybe_user2: std::result::Result<User, RouteError> = conn.receive().await?;
+    let maybe_user2: std::result::Result<User, RouteError> = stream.receive().await?;
 
     let user2 = maybe_user2?;
 
