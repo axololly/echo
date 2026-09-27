@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Decode, Encode, postgres::PgTypeInfo, prelude::FromRow};
 
-use crate::{AssetID, Encrypted, PasswordProtected, Secret, SnowflakeID};
+use crate::{AssetID, Encrypted, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
 
 /// The activity status of a given user.
 #[derive(Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -65,5 +65,6 @@ pub struct User {
     #[sqlx(rename = "encrypted_secret")]
     pub secret: PasswordProtected<Secret>,
     #[sqlx(rename = "encrypted_state")]
-    pub state: Encrypted<UserState>
+    pub state: Encrypted<UserState>,
+    pub signature_verifier: SignatureVerifier
 }

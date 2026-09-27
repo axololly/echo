@@ -90,7 +90,8 @@ async fn handle_incoming_requests(
         let mut ctx = EchoContext {
             route_name,
             stream,
-            pool: pool.clone()
+            pool: pool.clone(),
+            user: None
         };
 
         let result = router.run_with(&mut ctx).await;
