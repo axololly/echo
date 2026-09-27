@@ -14,12 +14,15 @@ fn main() {
     // signatures.
     let user_signature_verifier: VerifyingKey = user_secret.into();
 
+    // Pretend we are user 456 pretending to be user 123.
+    let bad_user_secret = Secret::random();
+
     // The server assigns them a public user ID.
     let user_id = 123;
 
     // When the user wants to authenticate, they can sign their
     // own ID and send that to the server.
-    let signed_user_id: Signed<u64> = user_secret.sign(user_id);
+    let signed_user_id: Signed<u64> = bad_user_secret.sign(user_id);
 
     // The server would then get the signature verifier for
     // the user ID inside the Signed<UserID>, but we have
