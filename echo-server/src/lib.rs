@@ -2,6 +2,7 @@ pub mod connection;
 pub mod error;
 pub mod router;
 pub mod routes;
+pub mod runner;
 
 mod macros;
 
