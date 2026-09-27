@@ -59,9 +59,9 @@ impl EchoRouter {
     /// Use the following [`EchoContext`] on this router by either
     /// redirecting execution to the correct callback, or sending
     /// back an error message.
-    pub async fn run_with(&self, mut ctx: EchoContext) -> RouteResult<()> {
+    pub async fn run_with(&self, ctx: &mut EchoContext) -> RouteResult<()> {
         match self.routes.get(ctx.route_name.as_str()) {
-            Some(route) => route.callback(&mut ctx).await?,
+            Some(route) => route.callback(ctx).await?,
             None => {
                 ctx.conn.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
             }
