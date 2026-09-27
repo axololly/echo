@@ -90,7 +90,8 @@ async fn handle_incoming_requests(
         let ctx = EchoContext {
             route_name,
             stream,
-            pool: pool.clone()
+            pool: pool.clone(),
+            user: None
         };
 
         if let Err(report) = router.run_with(ctx).await {

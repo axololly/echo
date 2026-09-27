@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use echo_types::SnowflakeID;
 use sqlx::postgres::PgPool;
 
-use crate::{error::{RouteError, RouteResult}, stream::Stream};
+use crate::{auth::validate_user, error::{RouteError, RouteResult}, stream::Stream};
 
 /// A route that a client can take through the API.
 ///
@@ -18,6 +19,12 @@ pub trait EchoRoute: Send + Sync + 'static {
     /// The unique name of the route.
     fn name(&self) -> &'static str;
 
+    /// Whether or not the route requires authentication.
+    /// Defaults to false.
+    fn needs_authentication(&self) -> bool {
+        false
+    }
+
     /// The callback for the route itself.
     ///
     /// This is called once the client has decided that this
@@ -30,7 +37,8 @@ pub trait EchoRoute: Send + Sync + 'static {
 pub struct EchoContext {
     pub route_name: String,
     pub pool: PgPool,
-    pub stream: Stream
+    pub stream: Stream,
+    pub user: Option<SnowflakeID>
 }
 
 /// A mapping of route names to route objects themselves.
@@ -61,7 +69,13 @@ impl EchoRouter {
     /// back an error message.
     pub async fn run_with(&self, mut ctx: EchoContext) -> RouteResult<()> {
         match self.routes.get(ctx.route_name.as_str()) {
-            Some(route) => route.callback(&mut ctx).await?,
+            Some(route) => {
+                if route.needs_authentication() {
+                    validate_user(&mut ctx).await?;
+                }
+
+                route.callback(&mut ctx).await?;
+            },
             None => {
                 ctx.stream.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
             }

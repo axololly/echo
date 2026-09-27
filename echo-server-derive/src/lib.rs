@@ -7,7 +7,29 @@ use syn::{ItemFn, LitStr, ReturnType, parse_macro_input};
 // trait in the `echo-server` crate.
 #[proc_macro_attribute]
 pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
+    let mut input = parse_macro_input!(item as ItemFn);
+
+    let mut needs_authentication = true;
+
+    input.attrs.retain(|attr| {
+        let maybe_ident = attr
+            .path()
+            .segments
+            .first()
+            .map(|seg| &seg.ident);
+
+        let Some(ident) = maybe_ident else {
+            return true;
+        };
+
+        if ident == "no_auth" {
+            needs_authentication = false;
+
+            return false;
+        }
+
+        true
+    });
 
     let fn_name = &input.sig.ident;
     let route_name = parse_macro_input!(attr as LitStr);
@@ -27,6 +49,10 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
         impl crate::router::EchoRoute for #fn_name {
             fn name(&self) -> &'static str {
                 #route_name
+            }
+
+            fn needs_authentication(&self) -> bool {
+                #needs_authentication
             }
 
             async fn callback(&self, ctx: &mut EchoContext) -> crate::error::RouteResult<()> {
