@@ -1,1 +1,1 @@
-In `handle_incoming_requests`, I need to make sure that errors from accepting streams and receiving route names do not stop the entire loop
+Add a `account_created` field to the `User` type and the `users` table in the database
