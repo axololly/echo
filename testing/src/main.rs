@@ -1,7 +1,7 @@
-use std::{net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::Arc};
+use std::{net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
 use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
-use echo_types::{PasswordProtected, Secret, User, UserSettings, UserState};
+use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -81,6 +81,8 @@ async fn access_route<R>(
     // Hand off execution on the route to the caller
     let out = stream_fn(&mut stream).await?;
 
+    println!("finished accessing route {route:?}");
+
     stream.close()?;
 
     Ok(out)
@@ -90,16 +92,27 @@ const DEFAULT_PASSWORD: &str = "6767";
 
 type RouteResult<T> = std::result::Result<T, RouteError>;
 
+const SERVER_ADDR: &str = "localhost:4433";
+static PORT_NUM: AtomicU16 = AtomicU16::new(0);
+
 /// Create an account with a given username on the server,
 /// returning the created user object, and authenticating
 /// the connection too.
-async fn create_account(
-    parent: &quinn::Connection,
-    username: &str
-) -> Result<User> {
+async fn connect_and_create_account(
+    username: &str,
+    cert: CertificateDer<'static>
+) -> Result<(User, quinn::Connection)> {
+    let port_num = PORT_NUM.fetch_add(1, Ordering::Relaxed);
+
+    let parent = connect_to_server(
+        format!("localhost:{}", 10090 + port_num),
+        SERVER_ADDR,
+        cert
+    ).await?;
+
     let secret = Secret::random();
 
-    let account = access_route(parent, "users.create", async |stream| {
+    let account = access_route(&parent, "users.create", async |stream| {
         let data = CreateNewUserData {
             username: username.to_string(),
             secret: PasswordProtected::new(&secret, DEFAULT_PASSWORD),
@@ -118,10 +131,12 @@ async fn create_account(
 
         let user: User = stream.receive::<RouteResult<_>>().await??;
 
+        dbg!((&user.name, user.id));
+
         Ok(user)
     }).await?;
 
-    access_route(parent, "login", async |stream| {
+    access_route(&parent, "login", async |stream| {
         let signed_id = secret.sign(account.id);
 
         stream.send(&signed_id).await?;
@@ -131,7 +146,7 @@ async fn create_account(
         Ok(())
     }).await?;
 
-    Ok(account)
+    Ok((account, parent))
 }
 
 #[tokio::main]
@@ -171,7 +186,7 @@ async fn main() -> Result<()> {
 
     // Start the server up
     tokio::spawn(run(
-        "localhost:4433",
+        SERVER_ADDR,
         cert.clone(),
         key.into(),
         10,
@@ -179,26 +194,65 @@ async fn main() -> Result<()> {
         pool
     ));
 
-    // Connect to the server
-    let parent = &connect_to_server(
-        "localhost:10092",
-        "localhost:4433",
-        cert
-    ).await?;
+    // Make our accounts
+    let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
+    let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
 
-    // Make an account
-    let alice = create_account(parent, "alice").await?;
+    // Alice sends Bob a friend request
+    access_route(&alice_conn, "users.friends.requests.create", async |stream| {
+        stream.send(&bob.id).await?;
 
-    // Try to get the same account again
-    let alice2 = access_route(parent, "users.get", async |stream| {
-        stream.send(&alice.id).await?;
+        stream.receive::<RouteResult<()>>().await??;
 
-        let user = stream.receive::<RouteResult<User>>().await??;
-
-        Ok(user)
+        Ok(())
     }).await?;
 
-    assert_eq!(alice, alice2);
+    // Test that the friend request appeared for Bob
+    access_route(&bob_conn, "users.friends.requests.get", async |stream| {
+        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
+
+        dbg!(&requests);
+
+        assert!(
+            requests.iter().any(|req| req.sender == alice.id),
+            "bob did not get a friend request from alice"
+        );
+
+        Ok(())
+    }).await?;
+
+    // Bob now accepts Alice's friend request
+    access_route(&bob_conn, "users.friends.requests.accept", async |stream| {
+        stream.send(&alice.id).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    // Alice checks her friends list
+    access_route(&alice_conn, "users.friends.get", async |stream| {
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            friends.iter().any(|f| f.id == bob.id),
+            "alice did not get bob as a friend"
+        );
+
+        Ok(())
+    }).await?;
+
+    // Bob checks his friends list
+    access_route(&bob_conn, "users.friends.get", async |stream| {
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            friends.iter().any(|f| f.id == alice.id),
+            "bob did not get alice as a friend"
+        );
+
+        Ok(())
+    }).await?;
 
     println!("assertions passed!");
 
