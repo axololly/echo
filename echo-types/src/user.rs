@@ -69,3 +69,21 @@ pub struct User {
     pub state: Encrypted<UserState>,
     pub signature_verifier: SignatureVerifier
 }
+
+/// A user's friend, containing the friend's user ID
+/// and when they first became friends.
+#[derive(Clone, Copy, Deserialize, FromRow, Serialize)]
+pub struct Friend {
+    pub id: SnowflakeID,
+    pub friends_since: DateTime<Utc>
+}
+
+/// A request to become friends with another user.
+#[derive(Clone, Copy, Deserialize, FromRow, Serialize)]
+pub struct FriendRequest {
+    pub sender: SnowflakeID,
+    pub sent_at: DateTime<Utc>
+
+    // TODO: include material for creating an
+    // encrypted chat between the two
+}

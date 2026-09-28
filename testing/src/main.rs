@@ -6,7 +6,7 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
-use echo_types::{PasswordProtected, Secret, User, UserSettings, UserState};
+use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, User, UserSettings, UserState};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
@@ -62,6 +62,77 @@ async fn connect_to_server(
     Ok(conn)
 }
 
+/// Access a route in the API, then communicate with the server
+/// under that same route using the same [`Stream`].
+async fn access_route<R>(
+    parent: &quinn::Connection,
+    route: &str,
+    stream_fn: impl AsyncFn(&mut Stream) -> Result<R>
+) -> Result<R> {
+    let mut stream = Stream::open_bi(parent).await?;
+
+    // Handle routing to reduce boilerplate
+    stream.send(&route).await?;
+
+    // Hand off execution on the route to the caller
+    let out = stream_fn(&mut stream).await?;
+
+    stream.close()?;
+
+    Ok(out)
+}
+
+const DEFAULT_PASSWORD: &str = "6767";
+
+/// Perform server authentication using the given account.
+/// Because this is a testing environment, the password
+/// will always stay the same.
+pub async fn authenticate_as(
+    stream: &mut Stream,
+    user: &User
+) -> Result<()> {
+    let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
+
+    let user_signed_id = user_secret.sign(user.id);
+
+    stream.send(&user_signed_id).await?;
+
+    Ok(())
+}
+
+type RouteResult<T> = std::result::Result<T, RouteError>;
+
+/// Create an account with a given username on the server,
+/// returning the created user object.
+async fn create_account(
+    parent: &quinn::Connection,
+    username: &str
+) -> Result<User> {
+    access_route(parent, "users.create", async |stream| {
+        let secret = Secret::random();
+
+        let data = CreateNewUserData {
+            username: username.to_string(),
+            secret: PasswordProtected::new(&secret, DEFAULT_PASSWORD),
+            state: secret.encrypt(&UserState {
+                settings: UserSettings {
+                    logout_after: 0,
+                    enable_read_receipts: true,
+                    enable_typing_indicators: true,
+                    ignore_future_requests_from: vec![]
+                }
+            }),
+            signature_verifier: secret.into()
+        };
+
+        stream.send(&data).await?;
+
+        let user: User = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(user)
+    }).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -114,55 +185,69 @@ async fn main() -> Result<()> {
         cert
     ).await?;
 
-    // Connect to the API
-    let mut stream = Stream::open_bi(parent).await?;
+    // Make our accounts
+    let alice = create_account(parent, "alice").await?;
+    let bob = create_account(parent, "bob").await?;
 
-    // Choose to create a user account
-    stream.send(&"users.create").await?;
+    // Alice sends Bob a friend request
+    access_route(parent, "users.friends.requests.create", async |stream| {
+        authenticate_as(stream, &alice).await?;
 
-    let secret = Secret::random();
-    let password = "6767";
+        stream.send(&bob.id).await?;
 
-    let data = CreateNewUserData {
-        username: "alice".to_string(),
-        secret: PasswordProtected::new(&secret, password),
-        state: secret.encrypt(&UserState {
-            settings: UserSettings {
-                logout_after: 0,
-                enable_read_receipts: true,
-                enable_typing_indicators: true,
-                ignore_future_requests_from: vec![]
-            }
-        }),
-        signature_verifier: secret.into()
-    };
+        Ok(())
+    }).await?;
 
-    stream.send(&data).await?;
+    // Test that the friend request appeared for Bob
+    access_route(parent, "users.friends.requests.get", async |stream| {
+        authenticate_as(stream, &bob).await?;
 
-    let maybe_user: std::result::Result<User, RouteError> = stream.receive().await?;
+        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
 
-    let user = maybe_user?;
+        assert!(
+            requests.iter().any(|req| req.sender == alice.id),
+            "bob did not get a friend request from alice"
+        );
 
-    stream.close()?;
+        Ok(())
+    }).await?;
 
-    // Open a new connection to the API
-    stream = Stream::open_bi(parent).await?;
+    // Bob now accepts Alice's friend request
+    access_route(parent, "users.friends.requests.accept", async |stream| {
+        authenticate_as(stream, &bob).await?;
 
-    // Choose to get a user account instead
-    stream.send(&"users.get").await?;
+        stream.send(&alice.id).await?;
 
-    stream.send(&user.id).await?;
+        Ok(())
+    }).await?;
 
-    let maybe_user2: std::result::Result<User, RouteError> = stream.receive().await?;
+    // Alice checks her friends list
+    access_route(parent, "users.friends.get", async |stream| {
+        authenticate_as(stream, &alice).await?;
 
-    let user2 = maybe_user2?;
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
 
-    // Check the two user accounts are the same
-    assert_eq!(user, user2);
+        assert!(
+            friends.iter().any(|f| f.id == bob.id),
+            "alice did not get bob as a friend"
+        );
 
-    // Check that after fetching, we can still decrypt the user's
-    // secret if we have the right password
-    assert!(user2.secret.unlock(password).is_ok());
+        Ok(())
+    }).await?;
+
+    // Bob checks his friends list
+    access_route(parent, "users.friends.get", async |stream| {
+        authenticate_as(stream, &bob).await?;
+
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            friends.iter().any(|f| f.id == alice.id),
+            "bob did not get alice as a friend"
+        );
+
+        Ok(())
+    }).await?;
 
     println!("assertions passed!");
 

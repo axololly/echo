@@ -60,6 +60,10 @@ impl EchoRouter {
         // User routes
         router.register_route(get_user);
         router.register_route(create_new_user);
+        router.register_route(get_user_friends);
+        router.register_route(get_friend_requests);
+        router.register_route(create_friend_request);
+        router.register_route(accept_friend_request);
 
         router
     }
