@@ -188,3 +188,18 @@ macro_rules! execute {
             .context($crate::error::RouteError::Database)?
     }};
 }
+
+/// Check if a row exists.
+///
+/// # Note
+///
+/// This only works for queries that start with `SELECT 1 FROM ...`
+/// because it tries to fetch an `Option<i32>`.
+#[macro_export]
+macro_rules! exists {
+    ($conn:expr, $s:expr, $($v:expr),+) => {{
+        let maybe_row: Option<i32> = $crate::fetch_opt_scalar!($conn, $s, $($v),+);
+
+        maybe_row.is_some()
+    }};
+}

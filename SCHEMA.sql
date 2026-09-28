@@ -21,3 +21,39 @@ CREATE TABLE users (
     encrypted_state BYTEA NOT NULL,
     signature_verifier BYTEA NOT NULL
 );
+
+CREATE TABLE friendships (
+    user1 INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    user2 INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    friends_since TIMESTAMPTZ NOT NULL
+        DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (user1, user2),
+
+    CONSTRAINT user_id_order CHECK (user1 < user2)
+);
+
+CREATE INDEX idx_friendships_user2 ON friendships(user2, user1);
+
+CREATE TABLE friend_requests (
+    sender INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    receiver INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    sent_at TIMESTAMPTZ NOT NULL
+        DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (sender, receiver)
+);
+
+CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);

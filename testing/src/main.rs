@@ -6,7 +6,7 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
-use echo_types::{PasswordProtected, Secret, User, UserSettings, UserState};
+use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, User, UserSettings, UserState};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
@@ -185,19 +185,59 @@ async fn main() -> Result<()> {
         cert
     ).await?;
 
-    // Make an account
+    // Make our accounts
     let alice = create_account(parent, "alice").await?;
+    let bob = create_account(parent, "bob").await?;
 
-    // Try to get the same account again
-    let alice2 = access_route(parent, "users.get", async |stream| {
-        stream.send(&alice.id).await?;
+    // Alice sends Bob a friend request
+    access_route(parent, "users.friends.requests.create", async |stream| {
+        stream.send(&bob.id).await?;
 
-        let user = stream.receive::<RouteResult<User>>().await??;
-
-        Ok(user)
+        Ok(())
     }).await?;
 
-    assert_eq!(alice, alice2);
+    // Test that the friend request appeared for Bob
+    access_route(parent, "users.friends.requests.get", async |stream| {
+        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            requests.iter().any(|req| req.sender == alice.id),
+            "bob did not get a friend request from alice"
+        );
+
+        Ok(())
+    }).await?;
+
+    // Bob now accepts Alice's friend request
+    access_route(parent, "users.friends.requests.accept", async |stream| {
+        stream.send(&alice.id).await?;
+
+        Ok(())
+    }).await?;
+
+    // Alice checks her friends list
+    access_route(parent, "users.friends.get", async |stream| {
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            friends.iter().any(|f| f.id == bob.id),
+            "alice did not get bob as a friend"
+        );
+
+        Ok(())
+    }).await?;
+
+    // Bob checks his friends list
+    access_route(parent, "users.friends.get", async |stream| {
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            friends.iter().any(|f| f.id == alice.id),
+            "bob did not get alice as a friend"
+        );
+
+        Ok(())
+    }).await?;
 
     println!("assertions passed!");
 
