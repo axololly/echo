@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Decode, Encode, postgres::PgTypeInfo, prelude::FromRow};
+use vodozemac::olm::AccountPickle;
 
-use crate::{AssetID, Encrypted, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
+use crate::{AssetID, Encrypted, OlmPublicKey, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
 
 /// The activity status of a given user.
 #[derive(Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -67,7 +68,9 @@ pub struct User {
     pub secret: PasswordProtected<Secret>,
     #[sqlx(rename = "encrypted_state")]
     pub state: Encrypted<UserState>,
-    pub signature_verifier: SignatureVerifier
+    pub signature_verifier: SignatureVerifier,
+    pub olm_account: Encrypted<AccountPickle>,
+    pub olm_public_key: OlmPublicKey
 }
 
 /// A user's friend, containing the friend's user ID
@@ -83,7 +86,4 @@ pub struct Friend {
 pub struct FriendRequest {
     pub sender: SnowflakeID,
     pub sent_at: DateTime<Utc>
-
-    // TODO: include material for creating an
-    // encrypted chat between the two
 }

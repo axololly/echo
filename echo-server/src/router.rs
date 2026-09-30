@@ -66,6 +66,9 @@ impl EchoRouter {
         router.register_route(create_friend_request);
         router.register_route(accept_friend_request);
 
+        // Inbox routes
+        router.register_route(establish_pending_dm_sessions);
+
         router
     }
 
