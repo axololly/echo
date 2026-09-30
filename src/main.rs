@@ -42,15 +42,24 @@ fn main() -> rootcause::Result<()> {
         println!("(bob) alice said: {text:?}");
     }
 
+    let bob_message = bob_session.encrypt("hello alice")?;
+
     // Bob decides to send Alice a message, and Alice reads it.
     {
-        let bob_message = bob_session.encrypt("hello alice")?;
-
         let plaintext = alice_session.decrypt(&bob_message)?;
 
         let text = str::from_utf8(&plaintext)?;
 
         println!("(alice) bob said: {text:?}");
+    }
+
+    // Alice then tries to decrypt Bob's message again.
+    {
+        let plaintext = alice_session.decrypt(&bob_message)?;
+
+        let text = str::from_utf8(&plaintext)?;
+
+        println!("(alice 2) bob said: {text:?}");
     }
 
     Ok(())
