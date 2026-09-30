@@ -19,7 +19,9 @@ CREATE TABLE users (
     status TEXT CHECK (char_length(status) <= 200),
     encrypted_secret BYTEA NOT NULL,
     encrypted_state BYTEA NOT NULL,
-    signature_verifier BYTEA NOT NULL
+    signature_verifier BYTEA NOT NULL,
+    olm_account BYTEA NOT NULL,
+    olm_public_key BYTEA NOT NULL
 );
 
 CREATE TABLE friendships (
@@ -50,6 +52,9 @@ CREATE TABLE friend_requests (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
+    one_time_key BYTEA NOT NULL
+        CHECK (length(one_time_key) = 32),
+
     sent_at TIMESTAMPTZ NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
 
@@ -57,3 +62,31 @@ CREATE TABLE friend_requests (
 );
 
 CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver);
+
+CREATE TABLE pending_dm_sessions (
+    waiting_on INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    other INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    pre_key_msg BYTEA NOT NULL,
+
+    PRIMARY KEY (waiting_on, other)
+);
+
+CREATE TABLE dm_sessions (
+    owner INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    other INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    session BYTEA NOT NULL,
+
+    PRIMARY KEY (owner, other)
+);

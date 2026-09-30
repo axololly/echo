@@ -203,3 +203,14 @@ macro_rules! exists {
         maybe_row.is_some()
     }};
 }
+
+/// Wrap a value in `Ok`, and set the result type to `()`.
+///
+/// This is useful for sending non-error data from the server
+/// to the client.
+#[macro_export]
+macro_rules! ok {
+    ($v:expr) => {
+        &Ok::<_, ()>($v)
+    };
+}

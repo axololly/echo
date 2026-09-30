@@ -19,3 +19,4 @@ serde = { version = "1.0.229", features = ["derive"] }
 sha2 = { version = "0.11.0", features = ["zeroize"] }
 sqlx = { version = "0.9.0", features = ["postgres", "runtime-tokio"] }
 thiserror = "2.0.21"
+vodozemac = "0.11.1"

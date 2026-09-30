@@ -99,12 +99,30 @@ pub const NONCE_SIZE: usize = 24;
 /// how to deserialise the decrypted output.
 ///
 /// Encryption is done symmetrically using ChaCha20Poly1305.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Encrypted<T> {
     payload: Vec<u8>,
     nonce: [u8; NONCE_SIZE],
     _data: PhantomData<T>,
 }
+
+impl<T> Clone for Encrypted<T> {
+    fn clone(&self) -> Self {
+        Self {
+            payload: self.payload.clone(),
+            nonce: self.nonce,
+            _data: PhantomData
+        }
+    }
+}
+
+impl<T> PartialEq for Encrypted<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.payload, &self.nonce) == (&other.payload, &other.nonce)
+    }
+}
+
+impl<T> Eq for Encrypted<T> {}
 
 impl<T> Debug for Encrypted<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
