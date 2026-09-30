@@ -1,13 +1,14 @@
-use std::{net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::Arc};
+use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::Arc};
 
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
-use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
-use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, User, UserSettings, UserState};
+use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, UnestablishedDmSession}, runner::run, stream::Stream};
+use echo_types::{FriendRequest, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
+use vodozemac::olm::{Account, OlmMessage, SessionConfig};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
 fn into_socket_addr(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
@@ -67,9 +68,11 @@ async fn connect_to_server(
 async fn access_route<R>(
     parent: &quinn::Connection,
     route: &str,
-    stream_fn: impl AsyncFn(&mut Stream) -> Result<R>
+    mut stream_fn: impl AsyncFnMut(&mut Stream) -> Result<R>
 ) -> Result<R> {
     let mut stream = Stream::open_bi(parent).await?;
+
+    println!("accessing route {route:?}");
 
     // Handle routing to reduce boilerplate
     stream.send(&route).await?;
@@ -110,6 +113,7 @@ async fn create_account(
 ) -> Result<User> {
     access_route(parent, "users.create", async |stream| {
         let secret = Secret::random();
+        let olm_account = Account::new();
 
         let data = CreateNewUserData {
             username: username.to_string(),
@@ -122,7 +126,9 @@ async fn create_account(
                     ignore_future_requests_from: vec![]
                 }
             }),
-            signature_verifier: secret.into()
+            signature_verifier: secret.into(),
+            olm_account: secret.encrypt(&olm_account.pickle()),
+            olm_public_key: olm_account.curve25519_key()
         };
 
         stream.send(&data).await?;
@@ -189,11 +195,29 @@ async fn main() -> Result<()> {
     let alice = create_account(parent, "alice").await?;
     let bob = create_account(parent, "bob").await?;
 
+    let alice_secret = alice.secret.unlock(DEFAULT_PASSWORD)?;
+    let mut alice_olm: Account = alice_secret.decrypt(&alice.olm_account)?.into();
+
+    let bob_secret = bob.secret.unlock(DEFAULT_PASSWORD)?;
+    let bob_olm: Account = bob_secret.decrypt(&bob.olm_account)?.into();
+
     // Alice sends Bob a friend request
     access_route(parent, "users.friends.requests.create", async |stream| {
         authenticate_as(stream, &alice).await?;
 
-        stream.send(&bob.id).await?;
+        let result = alice_olm.generate_one_time_keys(1);
+
+        alice_olm.mark_keys_as_published();
+
+        let one_time_key = result.created[0];
+
+        let data = CreateFriendRequestData {
+            receiver: bob.id,
+            one_time_key,
+            new_account: alice_secret.encrypt(&alice_olm.pickle())
+        };
+
+        stream.send(&data).await?;
 
         Ok(())
     }).await?;
@@ -212,41 +236,63 @@ async fn main() -> Result<()> {
         Ok(())
     }).await?;
 
-    // Bob now accepts Alice's friend request
-    access_route(parent, "users.friends.requests.accept", async |stream| {
+    // Bob now accepts Alice's friend request and makes an Olm session.
+    let bob_to_alice = access_route(parent, "users.friends.requests.accept", async |stream| {
         authenticate_as(stream, &bob).await?;
 
         stream.send(&alice.id).await?;
 
-        Ok(())
+        let FriendRequestKeys {
+            public_key,
+            one_time_key
+        } = stream.receive::<RouteResult<_>>().await??;
+
+        let mut session = bob_olm.create_outbound_session(
+            SessionConfig::version_1(),
+            public_key,
+            one_time_key
+        )?;
+
+        let OlmMessage::PreKey(pre_key_message) = session.encrypt([])? else {
+            unreachable!()
+        };
+
+        let data = FriendRequestSessionData {
+            session: bob_secret.encrypt(&session.pickle()),
+            pre_key_message
+        };
+
+        stream.send(&data).await?;
+
+        Ok(session)
     }).await?;
 
-    // Alice checks her friends list
-    access_route(parent, "users.friends.get", async |stream| {
+    // Alice checks her DM session inbox to fully complete the channel.
+    let alice_to_bob = access_route(parent, "inbox.sessions.dm.establish", async |stream| {
         authenticate_as(stream, &alice).await?;
 
-        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+        let entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
 
-        assert!(
-            friends.iter().any(|f| f.id == bob.id),
-            "alice did not get bob as a friend"
-        );
+        let UnestablishedDmSession {
+            user_olm_public_key,
+            pre_key_message
+        } = &entries[&bob.id];
 
-        Ok(())
-    }).await?;
+        let session = alice_olm.create_inbound_session(
+            SessionConfig::version_1(),
+            *user_olm_public_key,
+            pre_key_message
+        )?.session;
 
-    // Bob checks his friends list
-    access_route(parent, "users.friends.get", async |stream| {
-        authenticate_as(stream, &bob).await?;
+        let mut sessions = HashMap::new();
 
-        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+        sessions.insert(bob.id, bob_secret.encrypt(&session.pickle()));
 
-        assert!(
-            friends.iter().any(|f| f.id == alice.id),
-            "bob did not get alice as a friend"
-        );
+        stream.send(&sessions).await?;
 
-        Ok(())
+        stream.send(&alice_secret.encrypt(&alice_olm.pickle())).await?;
+
+        Ok(session)
     }).await?;
 
     println!("assertions passed!");

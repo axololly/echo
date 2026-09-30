@@ -13,4 +13,5 @@ rootcause = "0.13.0"
 rustls-pki-types = "1.15.1"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1.53.1", features = ["full"] }
+vodozemac = "0.11.1"
 webpki-roots = "1.0.9"

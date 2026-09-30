@@ -65,6 +65,9 @@ impl EchoRouter {
         router.register_route(create_friend_request);
         router.register_route(accept_friend_request);
 
+        // Inbox routes
+        router.register_route(establish_pending_dm_sessions);
+
         router
     }
 
@@ -78,7 +81,9 @@ impl EchoRouter {
                     validate_user(&mut ctx).await?;
                 }
 
-                route.callback(&mut ctx).await?;
+                if let Err(e) = route.callback(&mut ctx).await {
+                    println!("Server error: {e:?}");
+                }
             },
             None => {
                 ctx.stream.send(&Err::<(), _>(RouteError::UnknownResource)).await?;
