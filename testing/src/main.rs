@@ -1,13 +1,14 @@
-use std::{net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
+use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, router::EchoRouter, routes::CreateNewUserData, runner::run, stream::Stream};
-use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, User, UserSettings, UserState};
+use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, UnestablishedDmSession}, runner::run, stream::Stream};
+use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
+use vodozemac::olm::{Account, OlmMessage, SessionConfig};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
 fn into_socket_addr(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
@@ -111,6 +112,7 @@ async fn connect_and_create_account(
     ).await?;
 
     let secret = Secret::random();
+    let olm_account = Account::new();
 
     let account = access_route(&parent, "users.create", async |stream| {
         let data = CreateNewUserData {
@@ -124,7 +126,9 @@ async fn connect_and_create_account(
                     ignore_future_requests_from: vec![]
                 }
             }),
-            signature_verifier: secret.into()
+            signature_verifier: secret.into(),
+            olm_account: secret.encrypt(&olm_account.pickle()),
+            olm_public_key: olm_account.curve25519_key()
         };
 
         stream.send(&data).await?;
@@ -194,13 +198,31 @@ async fn main() -> Result<()> {
         pool
     ));
 
-    // Make our accounts
+    // Alice and Bob create their accounts
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
 
+    let alice_secret = alice.secret.unlock(DEFAULT_PASSWORD)?;
+    let mut alice_olm: Account = alice_secret.decrypt(&alice.olm_account)?.into();
+
+    let bob_secret = bob.secret.unlock(DEFAULT_PASSWORD)?;
+    let bob_olm: Account = bob_secret.decrypt(&bob.olm_account)?.into();
+
     // Alice sends Bob a friend request
     access_route(&alice_conn, "users.friends.requests.create", async |stream| {
-        stream.send(&bob.id).await?;
+        let result = alice_olm.generate_one_time_keys(1);
+
+        alice_olm.mark_keys_as_published();
+
+        let one_time_key = result.created[0];
+
+        let data = CreateFriendRequestData {
+            receiver: bob.id,
+            one_time_key,
+            new_account: alice_secret.encrypt(&alice_olm.pickle())
+        };
+
+        stream.send(&data).await?;
 
         stream.receive::<RouteResult<()>>().await??;
 
@@ -231,13 +253,35 @@ async fn main() -> Result<()> {
         Ok(())
     }).await?;
 
-    // Bob now accepts Alice's friend request
-    access_route(&bob_conn, "users.friends.requests.accept", async |stream| {
+    // Bob now accepts Alice's friend request and makes an Olm session.
+    let _bob_to_alice = access_route(&bob_conn, "users.friends.requests.accept", async |stream| {
         stream.send(&alice.id).await?;
+
+        let FriendRequestKeys {
+            public_key,
+            one_time_key
+        } = stream.receive::<RouteResult<_>>().await??;
+
+        let mut session = bob_olm.create_outbound_session(
+            SessionConfig::version_1(),
+            public_key,
+            one_time_key
+        )?;
+
+        let OlmMessage::PreKey(pre_key_message) = session.encrypt([])? else {
+            unreachable!()
+        };
+
+        let data = FriendRequestSessionData {
+            session: bob_secret.encrypt(&session.pickle()),
+            pre_key_message
+        };
+
+        stream.send(&data).await?;
 
         stream.receive::<RouteResult<()>>().await??;
 
-        Ok(())
+        Ok(session)
     }).await?;
 
     // Alice checks her friends list to check Bob is in there
@@ -271,6 +315,34 @@ async fn main() -> Result<()> {
         stream.receive::<RouteResult<()>>().await??;
 
         Ok(())
+    }).await?;
+
+    // Alice checks her DM session inbox to fully complete the channel.
+    let _alice_to_bob = access_route(&alice_conn, "inbox.sessions.dm.establish", async |stream| {
+        let entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
+
+        let UnestablishedDmSession {
+            user_olm_public_key,
+            pre_key_message
+        } = &entries[&bob.id];
+
+        let session = alice_olm.create_inbound_session(
+            SessionConfig::version_1(),
+            *user_olm_public_key,
+            pre_key_message
+        )?.session;
+
+        let mut sessions = HashMap::new();
+
+        sessions.insert(bob.id, alice_secret.encrypt(&session.pickle()));
+
+        stream.send(&sessions).await?;
+
+        stream.send(&alice_secret.encrypt(&alice_olm.pickle())).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(session)
     }).await?;
 
     println!("assertions passed!");
