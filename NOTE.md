@@ -1,6 +1,8 @@
-Cannot decrypt Olm messages multiple times due to forward and backward secrecy, which means Olm messages are for transport exclusively and NOT storage
+Can decrypt Megolm messages multiple times because the session key has no backward secrecy (the HKDF it uses to advance group state goes forward, so a current key can decrypt all current and future messages)
 
-Therefore, a new storage layer has to be invented:
+Megolm has forward secrecy (the HKDF doesn't go back) but being able to decrypt past messages would involve preserving the keys, which creates partial forward secrecy
+
+Clearly, using Megolm for storage works against the protocol, so it should be used for transport only
 
 ## Storage Layer
 
