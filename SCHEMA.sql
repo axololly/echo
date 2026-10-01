@@ -90,3 +90,17 @@ CREATE TABLE dm_sessions (
 
     PRIMARY KEY (owner, other)
 );
+
+CREATE TABLE dm_messages (
+    sender INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    receiver INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    PRIMARY KEY (sender, receiver)
+);
+
+CREATE INDEX idx_dm_messages_receiver ON dm_messages(receiver);
