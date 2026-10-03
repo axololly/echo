@@ -3,19 +3,41 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use mls_rs::{GroupStateStorage, error::IntoAnyError};
 use mls_rs_core::group::{EpochRecord, GroupState};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 /// Data about an MLS group, used in [`MyGroupStorage`].
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct GroupData {
     epochs: BTreeMap<u64, Vec<u8>>,
     state: Vec<u8>
 }
 
 /// An in-memory implementation of [`GroupStateStorage`].
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct MyGroupStorage {
     inner: HashMap<Vec<u8>, GroupData>
+}
+
+impl MyGroupStorage {
+    /// Serialize the group storage and then check its size.
+    pub fn serialized_size(&self) -> usize {
+        println!("groups stored: {}", self.inner.len());
+
+        bitcode::serialize(&self.inner)
+            .expect("failed to serialise")
+            .len()
+    }
+}
+
+impl Clone for MyGroupStorage {
+    fn clone(&self) -> Self {
+        println!("cloning storage with {} groups inside", self.inner.len());
+
+        Self {
+            inner: self.inner.clone()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -77,7 +99,7 @@ impl GroupStateStorage for MyGroupStorage {
             data.epochs.insert(update.id, (*update.data).clone());
         }
 
-        println!("data: {:?}", self.inner);
+        // println!("data: {:?}", self.inner);
 
         Ok(())
     }
