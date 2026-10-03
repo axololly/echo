@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitcode = { version = "0.6.9", features = ["serde"] }
 mls-rs = "0.56.0"
 mls-rs-core = "0.27.0"
 mls-rs-crypto-rustcrypto = "0.22.1"
 rootcause = "0.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
 zeroize = "1.9.0"

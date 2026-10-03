@@ -126,5 +126,11 @@ fn main() -> rootcause::Result<()> {
         _ => println!("received different type of message: {received:?}")
     }
 
+    alice_group.write_to_storage()?;
+    bob_group.write_to_storage()?;
+
+    println!("alice group size: {}", alice.group_state_storage().serialized_size());
+    println!("bob group size: {}", bob.group_state_storage().serialized_size());
+
     Ok(())
 }

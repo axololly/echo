@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use mls_rs::{GroupStateStorage, error::IntoAnyError};
 use mls_rs_core::group::{EpochRecord, GroupState};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 /// Data about an MLS group, used in [`MyGroupStorage`].
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct GroupData {
     epochs: BTreeMap<u64, Vec<u8>>,
     state: Vec<u8>
@@ -15,6 +16,17 @@ struct GroupData {
 #[derive(Clone, Default)]
 pub struct MyGroupStorage {
     inner: HashMap<Vec<u8>, GroupData>
+}
+
+impl MyGroupStorage {
+    /// Serialize the group storage and then check its size.
+    pub fn serialized_size(&self) -> usize {
+        println!("groups stored: {}", self.inner.len());
+
+        bitcode::serialize(&self.inner)
+            .expect("failed to serialise")
+            .len()
+    }
 }
 
 #[derive(Debug)]
