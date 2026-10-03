@@ -1,7 +1,7 @@
 mod group_storage;
 use group_storage::MyGroupStorage;
 
-use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, ExtensionList, client_builder::{BaseConfig, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider}, group::{CommitOutput, ReceivedMessage}, identity::{SigningIdentity, basic::BasicIdentityProvider}};
+use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, ExtensionList, Group, client_builder::{BaseConfig, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider}, group::CommitOutput, identity::{SigningIdentity, basic::BasicIdentityProvider}};
 use mls_rs_core::identity::BasicCredential;
 use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 
@@ -43,90 +43,58 @@ fn make_client(username: &str) -> Client<ClientConfig> {
 
 fn main() -> rootcause::Result<()> {
     let alice = make_client("alice");
-    let bob = make_client("bob");
 
-    // MLS only has groups where multiple clients exchange messages.
-    // Let's say Alice creates one and decides to invite Bob.
     let mut alice_group = alice.create_group(
         ExtensionList::new(),
         ExtensionList::new(),
         None
     )?;
 
-    // A key package contains public keys used to add a client into
-    // a group chat. These are precomputed and uploaded on a central
-    // server, so that you can be added to a group chat offline.
-    let bob_key_pkg = bob.generate_key_package_message(
-        ExtensionList::new(),
-        ExtensionList::new(),
-        None
-    )?;
+    let mut client_groups: Vec<(Client<_>, Group<_>)> = vec![];
 
-    // MLS groups are decentralised, so you have to propose membership
-    // changes to other members. If you apply the change to your own
-    // group instance, but nobody else does, they won't be able to
-    // decrypt your messages because their group state is not the same
-    // as yours.
-    alice_group.propose_add(
-        bob_key_pkg,
-        vec![]
-    )?;
+    for i in 0..99 {
+        let client = make_client(&format!("user{i}"));
 
-    let CommitOutput {
-        // The message to be sent to everyone else so
-        // they can process the addition and decide to
-        // respect or refute it.
-        commit_message,
+        let key_pkg = client.generate_key_package_message(
+            ExtensionList::new(),
+            ExtensionList::new(),
+            None
+        )?;
 
-        // Bob's welcome message is in here
-        welcome_messages,
-        ..
-    } = alice_group.commit(vec![])?;
+        let proposal = alice_group.propose_add(key_pkg, vec![])?;
 
-    alice_group.process_incoming_message(commit_message)?;
+        let CommitOutput {
+            commit_message,
+            welcome_messages,
+            ..
+        } = alice_group.commit(vec![])?;
 
-    // Group state specifically addressed to Bob is in this list of welcome messages.
-    let bob_welcome_msg = &welcome_messages[0];
+        alice_group.process_incoming_message(commit_message.clone())?;
+        alice_group.write_to_storage()?;
 
-    // Bob can now join the group with this welcome message he was sent.
-    let (mut bob_group, _info) = bob.join_group(
-        None,
-        bob_welcome_msg,
-        None
-    )?;
+        for (_, group) in &mut client_groups {
+            group.process_incoming_message(proposal.clone())?;
+            group.process_incoming_message(commit_message.clone())?;
+            group.write_to_storage()?;
+        }
 
-    let alice_message = alice_group.encrypt_application_message(
-        b"hello bob",
-        vec![]
-    )?;
+        let (client_group, _) = client.join_group(
+            None,
+            &welcome_messages[0],
+            None
+        )?;
 
-    // MLS messages could be proposals, group state updates or regular messages,
-    // hence why we need to match over them.
-    let received = bob_group.process_incoming_message(alice_message)?;
-
-    match received {
-        ReceivedMessage::ApplicationMessage(desc) => {
-            let member = bob_group
-                .member_at_index(desc.sender_index)
-                .expect("no member at that index");
-
-            let sender_identifier = member
-                .signing_identity
-                .credential
-                .as_basic()
-                .expect("expected a basic credential, got something else")
-                .identifier();
-
-            println!("received data {:?} from sender {:?}", str::from_utf8(desc.data())?, str::from_utf8(sender_identifier)?);
-        },
-        _ => println!("received different type of message: {received:?}")
+        client_groups.push((client, client_group));
     }
 
-    alice_group.write_to_storage()?;
-    bob_group.write_to_storage()?;
+    println!("alice group size: {} bytes", alice.group_state_storage().serialized_size());
 
-    println!("alice group size: {}", alice.group_state_storage().serialized_size());
-    println!("bob group size: {}", bob.group_state_storage().serialized_size());
+    let total_size_of_other_members: usize = client_groups
+        .iter()
+        .map(|(client, _)| client.group_state_storage().serialized_size())
+        .sum();
+
+    println!("total serialised size of other members: {total_size_of_other_members} bytes");
 
     Ok(())
 }
