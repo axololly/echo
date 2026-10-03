@@ -1,54 +1,68 @@
-use vodozemac::megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig};
+use serde::Serialize;
+use vodozemac::{megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig}, olm::{Account, OlmMessage, SessionConfig}};
 
 const CONFIG: MegolmSessionConfig = MegolmSessionConfig::version_1();
 
+fn size_of<T: Serialize>(data: &T) -> usize {
+    bitcode::serialize(data).unwrap().len()
+}
+
 fn main() -> rootcause::Result<()> {
-    // A group session is a one-to-many method of communication.
-    // Alice's session does not know about Bob's session, and
-    // Bob's session does not know about Alice's session.
-    let mut alice_sender = GroupSession::new(CONFIG);
-    let mut bob_sender = GroupSession::new(CONFIG);
+    println!("Olm sessions:");
+    println!("================");
 
-    // Alice sends Bob a message.
-    {
-        // Bob needs Alice's session key to read her messages.
-        let mut bob_reads_alice = InboundGroupSession::new(
-            &alice_sender.session_key(),
-            CONFIG
-        );
+    let mut alice = Account::new();
+    let mut bob = Account::new();
 
-        // Alice creates the message to be sent
-        let alice_message = alice_sender.encrypt("hello bob");
+    let bob_otk = bob.generate_one_time_keys(1).created[0];
 
-        // Bob reads what Alice sent.
-        let bob_received = bob_reads_alice.decrypt(&alice_message)?;
+    bob.mark_keys_as_published();
 
-        println!("(from alice) bob received: {:?}", str::from_utf8(&bob_received.plaintext)?);
-    }
+    let mut alice_session = alice.create_outbound_session(
+        SessionConfig::version_1(),
+        bob.curve25519_key(),
+        bob_otk
+    )?;
 
-    // Alice needs Bob's session key to read her messages.
-    let mut alice_reads_bob = InboundGroupSession::new(
-        &bob_sender.session_key(),
-        CONFIG
-    );
+    println!("size of alice's created session: {} bytes", size_of(&alice_session.pickle()));
 
-    // Bob creates the message to be sent
-    let bob_message = bob_sender.encrypt("hello alice");
+    let OlmMessage::PreKey(pre_key_message) = alice_session.encrypt([])? else {
+        unreachable!()
+    };
 
-    // Bob sends Alice a message back.
-    {
-        // Alice reads what Bob sent.
-        let alice_received = alice_reads_bob.decrypt(&bob_message)?;
+    println!("size of alice's created session after message: {} bytes", size_of(&alice_session.pickle()));
 
-        println!("(from bob) alice received: {:?}", str::from_utf8(&alice_received.plaintext)?);
-    }
+    let bob_session = bob.create_inbound_session(
+        SessionConfig::version_1(),
+        alice.curve25519_key(),
+        &pre_key_message
+    )?.session;
 
-    // Alice re-reads Bob's message.
-    {
-        let alice_received = alice_reads_bob.decrypt(&bob_message)?;
+    println!("size of bob's created session: {} bytes", size_of(&bob_session.pickle()));
 
-        println!("(from bob 2) alice received: {:?}", str::from_utf8(&alice_received.plaintext)?);
-    }
+    println!("size of created DM: {} bytes", size_of(&alice_session.pickle()) + size_of(&bob_session.pickle()));
+
+    println!();
+
+    println!("Megolm sessions:");
+    println!("================");
+
+    let group_session = GroupSession::new(CONFIG);
+
+    println!("size of group session pickle: {} bytes", size_of(&group_session.pickle()));
+
+    println!();
+
+    println!("size of session key: {} bytes", size_of(&group_session.session_key()));
+    println!("size of 99 session keys: {} bytes", size_of(&group_session.session_key()) * 99);
+
+    let total_for_1_user = size_of(&group_session.pickle()) + size_of(&group_session.session_key()) * 99;
+
+    println!("total size for 1 user: {total_for_1_user} bytes");
+
+    println!();
+
+    println!("total size for a 100-person group chat: {} bytes", total_for_1_user * 100);
 
     Ok(())
 }
