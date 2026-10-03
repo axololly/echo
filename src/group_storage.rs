@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{collections::{BTreeMap, HashMap}, sync::{Arc, Mutex}};
 
 use async_trait::async_trait;
 use mls_rs::{GroupStateStorage, error::IntoAnyError};
@@ -14,29 +14,19 @@ struct GroupData {
 }
 
 /// An in-memory implementation of [`GroupStateStorage`].
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MyGroupStorage {
-    inner: HashMap<Vec<u8>, GroupData>
+    inner: Arc<Mutex<HashMap<Vec<u8>, GroupData>>>
 }
 
 impl MyGroupStorage {
     /// Serialize the group storage and then check its size.
     pub fn serialized_size(&self) -> usize {
-        println!("groups stored: {}", self.inner.len());
+        let inner = self.inner.lock().unwrap();
 
-        bitcode::serialize(&self.inner)
+        bitcode::serialize(&*inner)
             .expect("failed to serialise")
             .len()
-    }
-}
-
-impl Clone for MyGroupStorage {
-    fn clone(&self) -> Self {
-        println!("cloning storage with {} groups inside", self.inner.len());
-
-        Self {
-            inner: self.inner.clone()
-        }
     }
 }
 
@@ -53,6 +43,8 @@ impl GroupStateStorage for MyGroupStorage {
     fn state(&self, group_id: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
         let data = self
             .inner
+            .lock()
+            .unwrap()
             .get(group_id)
             .map(|data| data.state.clone())
             .map(Zeroizing::new);
@@ -69,6 +61,8 @@ impl GroupStateStorage for MyGroupStorage {
     ) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
         let found = self
             .inner
+            .lock()
+            .unwrap()
             .get(group_id)
             .and_then(|data| data.epochs.get(&epoch_id))
             .map(|state| Zeroizing::new(state.clone()));
@@ -84,8 +78,12 @@ impl GroupStateStorage for MyGroupStorage {
         epoch_inserts: Vec<EpochRecord>,
         epoch_updates: Vec<EpochRecord>,
     ) -> Result<(), Self::Error> {
-        let data = self
+        let mut inner = self
             .inner
+            .lock()
+            .unwrap();
+
+        let data = inner
             .entry(state.id)
             .or_default();
 
@@ -99,8 +97,6 @@ impl GroupStateStorage for MyGroupStorage {
             data.epochs.insert(update.id, (*update.data).clone());
         }
 
-        // println!("data: {:?}", self.inner);
-
         Ok(())
     }
 
@@ -108,6 +104,8 @@ impl GroupStateStorage for MyGroupStorage {
     fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
         let max = self
             .inner
+            .lock()
+            .unwrap()
             .get(group_id)
             .and_then(|data| data.epochs.last_key_value())
             .map(|(&max_epoch, _)| max_epoch);
