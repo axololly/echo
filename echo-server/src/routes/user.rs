@@ -1,9 +1,9 @@
-use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, SnowflakeID, User, UserState};
+use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserState};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{error::{RouteError as E, RouteResult}, execute, fetch_opt, fetch_opt_as, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, execute, fetch_one_scalar, fetch_opt, fetch_opt_as, route, router::EchoContext};
 
 /// An error that specifically occurred in one of the routes in this module.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -20,8 +20,28 @@ pub enum UserRouteError {
 
 use UserRouteError as U;
 
-#[route("users.get")]
+#[route("login")]
 #[no_auth]
+pub async fn login(ctx: &mut EchoContext) -> RouteResult<()> {
+    let signed_id: Signed<SnowflakeID> = ctx.stream.receive().await?;
+
+    let SignatureVerifier(verifying_key) = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT signature_verifier FROM users WHERE id = $1",
+        *signed_id
+    );
+
+    if signed_id.verify(verifying_key) {
+        ctx.user = Some(*signed_id);
+    }
+    else {
+        bail!(E::User(U::AuthenticationFailed));
+    }
+
+    Ok(())
+}
+
+#[route("users.get")]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let user_id: SnowflakeID = ctx // TODO: support looking up users by name
         .stream
