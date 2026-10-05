@@ -346,7 +346,7 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO dm_sessions (owner, other, session) VALUES ($1, $2, $3)",
+        "INSERT INTO dm_sessions (owner, other, blob) VALUES ($1, $2, $3)",
         receiver,
         sender,
         session
