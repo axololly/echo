@@ -1,4 +1,4 @@
-use std::{fmt::Debug, marker::PhantomData, ops::Deref, result::Result as StdResult};
+use std::{array::TryFromSliceError, fmt::Debug, marker::PhantomData, ops::Deref, result::Result as StdResult};
 
 use argon2::Argon2;
 use chacha20poly1305::{
@@ -62,6 +62,22 @@ impl Secret {
     /// Verify some data was signed with this [`Secret`].
     pub fn verify<T: Serialize>(&self, signature: &Signed<T>) -> bool {
         signature.verify((*self).into())
+    }
+}
+
+impl AsRef<[u8]> for Secret {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for Secret {
+    type Error = TryFromSliceError;
+
+    fn try_from(value: &[u8]) -> StdResult<Self, Self::Error> {
+        let inner = value.try_into()?;
+
+        Ok(Self(inner))
     }
 }
 
