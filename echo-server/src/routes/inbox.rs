@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use echo_types::{Encrypted, OlmPreKeyMessage, OlmPublicKey, SnowflakeID};
+use echo_types::{Encrypted, OlmPreKeyMessage, OlmPublicKey, Secret, SnowflakeID, SqlxOlmMessage};
 use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
-use vodozemac::{Curve25519PublicKey, olm::{AccountPickle, PreKeyMessage, SessionPickle}};
+use vodozemac::{Curve25519PublicKey, olm::{AccountPickle, OlmMessage, PreKeyMessage, SessionPickle}};
 
 use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, ok, route, router::EchoContext};
 
@@ -23,7 +23,7 @@ pub struct UnestablishedDmSession {
     pub pre_key_message: PreKeyMessage
 }
 
-#[route("inbox.sessions.dm.establish")]
+#[route("inbox.dm.sessions.establish")]
 pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
@@ -87,7 +87,7 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
 
             execute!(
                 &mut *tx,
-                "INSERT INTO dm_sessions (owner, other, session) VALUES ($1, $2, $3)",
+                "INSERT INTO dm_sessions (owner, other, blob) VALUES ($1, $2, $3)",
                 user,
                 other,
                 session
@@ -100,6 +100,77 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
             user,
             latest_account_state
         );
+
+        tx.commit().await.context(E::Database)?;
+
+        offset += per_page;
+    }
+
+    Ok(())
+}
+
+#[route("inbox.dm.messages.unread")]
+pub async fn process_unread_dm_messages(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+
+    let mut offset: i64 = 0;
+    let per_page: i64 = 50;
+
+    let stmt = "
+        SELECT
+            msg.id,
+            msg.sender,
+            umsg.blob
+        FROM unread_dm_messages umsg
+        INNER JOIN dm_messages msg ON msg.id = umsg.message_id
+        WHERE umsg.waiting_on = $1
+        LIMIT $2
+        OFFSET $3
+    ";
+
+    loop {
+        let rows: Vec<(
+            SnowflakeID,
+            SnowflakeID,
+            SqlxOlmMessage
+        )> = fetch_all_as!(
+            &ctx.pool,
+            stmt,
+            user,
+            per_page,
+            offset
+        );
+
+        let entries: HashMap<SnowflakeID, (SnowflakeID, OlmMessage)> = rows
+            .into_iter()
+            .map(|(id, author_id, olm)| (id, (author_id, olm.into())))
+            .collect();
+
+        ctx.stream.send(ok!(entries)).await?;
+
+        if entries.is_empty() {
+            break;
+        }
+
+        let mut resolved: HashMap<SnowflakeID, Encrypted<Secret>> = ctx.stream.receive().await?;
+
+        resolved.retain(|id, _| entries.contains_key(id));
+
+        let mut tx = ctx
+            .pool
+            .begin()
+            .await
+            .context(E::Database)?;
+
+        for (message_id, message_key) in resolved {
+            execute!(
+                &mut *tx,
+                "INSERT INTO message_decryption_keys (message_id, user_id, blob) VALUES ($1, $2, $3)",
+                message_id,
+                user,
+                message_key
+            );
+        }
 
         tx.commit().await.context(E::Database)?;
 

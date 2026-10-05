@@ -211,6 +211,6 @@ macro_rules! exists {
 #[macro_export]
 macro_rules! ok {
     ($v:expr) => {
-        &Ok::<_, ()>($v)
+        &Ok::<_, ()>(&$v)
     };
 }

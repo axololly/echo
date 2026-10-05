@@ -1,6 +1,7 @@
+use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgTypeInfo;
-use vodozemac::{Curve25519PublicKey, olm::PreKeyMessage};
+use vodozemac::{Curve25519PublicKey, olm::{OlmMessage, PreKeyMessage}};
 
 /// A [`sqlx`]-compliant wrapper around [`vodozemac`]'s [`Curve25519PublicKey`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,6 +88,57 @@ impl sqlx::Encode<'_, sqlx::Postgres> for OlmPreKeyMessage {
 }
 
 impl sqlx::Type<sqlx::Postgres> for OlmPreKeyMessage {
+    fn type_info() -> PgTypeInfo {
+        <Vec::<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+}
+
+/// A [`sqlx`]-compliant wrapper around [`vodozemac`]'s [`OlmMessage`].
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SqlxOlmMessage(OlmMessage);
+
+impl From<OlmMessage> for SqlxOlmMessage {
+    fn from(value: OlmMessage) -> Self {
+        Self(value)
+    }
+}
+
+impl From<SqlxOlmMessage> for OlmMessage {
+    fn from(value: SqlxOlmMessage) -> Self {
+        value.0
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Postgres> for SqlxOlmMessage {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = value.as_bytes()?;
+
+        let msg = OlmMessage::from_parts(
+            bytes[0] as usize,
+            &bytes[1..]
+        ).context("failed to decode olm message")?;
+
+        Ok(Self(msg))
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for SqlxOlmMessage {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let (ty, data) = self.0.to_parts();
+
+        buf.extend_from_slice(&[ty as u8]);
+        buf.extend_from_slice(&data);
+
+        Ok(sqlx::encode::IsNull::No)
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for SqlxOlmMessage {
     fn type_info() -> PgTypeInfo {
         <Vec::<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
     }

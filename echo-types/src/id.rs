@@ -1,6 +1,6 @@
-use std::{fmt::{Debug, Display}, sync::{Arc, LazyLock, Mutex, atomic::{AtomicI64, Ordering}}};
+use std::{fmt::{Debug, Display}, sync::{LazyLock, atomic::{AtomicI64, Ordering}}};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 /// A snowflake ID used for uniquely identifying data
@@ -46,17 +46,25 @@ impl Display for SnowflakeID {
     }
 }
 
+// When I started my college
+pub const ECHO_EPOCH: i64 = 1756975800 * 1000;
+
 /// Echo's snowflake ID generator.
 ///
 /// Sequence numbers are used to differentiate between
 /// snowflake IDs created within the same millisecond.
 pub struct SnowflakeGenerator {
     machine_id: i64,
-    last_timestamp: Arc<Mutex<DateTime<Utc>>>,
+    last_timestamp: AtomicI64,
     next_seq_num: AtomicI64
 }
 
 impl SnowflakeGenerator {
+    // Get a timestamp for internal use
+    fn now() -> i64 {
+        Utc::now().timestamp_millis() - ECHO_EPOCH
+    }
+
     /// Create a new snowflake generator with a given machine ID.
     ///
     /// Machine IDs are used to differentiate between multiple
@@ -64,29 +72,18 @@ impl SnowflakeGenerator {
     pub fn new(machine_id: i64) -> Self {
         Self {
             machine_id,
-            last_timestamp: Arc::new(Mutex::new(Utc::now())),
+            last_timestamp: AtomicI64::new(Self::now()),
             next_seq_num: AtomicI64::new(0)
         }
     }
 
     /// Generate the next [`SnowflakeID`].
     pub fn next(&self) -> SnowflakeID {
-        let now = Utc::now();
+        let now = Self::now();
 
-        let mut last = match self.last_timestamp.lock() {
-            Ok(lock) => lock,
-            Err(e) => {
-                self.last_timestamp.clear_poison();
+        let last = self.last_timestamp.swap(now, Ordering::Relaxed);
 
-                e.into_inner()
-            }
-        };
-
-        let delta = now - *last;
-
-        *last = now;
-
-        let sequence = if delta.num_milliseconds() == 0 {
+        let sequence = if now == last {
             self.next_seq_num.fetch_add(1, Ordering::Relaxed)
         }
         else {
@@ -94,7 +91,7 @@ impl SnowflakeGenerator {
         };
 
         SnowflakeID::from_components(
-            now.timestamp(),
+            now,
             self.machine_id,
             sequence
         )
@@ -103,6 +100,5 @@ impl SnowflakeGenerator {
 
 /// A project-wide snowflake ID generator.
 pub static SNOWFLAKE_GEN: LazyLock<SnowflakeGenerator> = LazyLock::new(|| {
-    // TODO: change the machine ID to something like the process ID
-    SnowflakeGenerator::new(1)
+    SnowflakeGenerator::new(std::process::id() as i64 % (1 << MACHINE_ID_BITS))
 });
