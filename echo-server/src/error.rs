@@ -2,7 +2,7 @@ use rootcause::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::routes::UserRouteError;
+use crate::routes::{DirectMessageRouteError, UserRouteError};
 
 /// An error related to accessing a route.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -23,8 +23,14 @@ pub enum RouteError {
     #[error("route requires authentication")]
     NeedsAuthentication,
 
+    #[error("data is too large, exceeded {_0} bytes")]
+    DataTooLarge(u64),
+
     #[error("user route error")]
-    User(#[from] UserRouteError)
+    User(#[from] UserRouteError),
+
+    #[error("direct message route error")]
+    DirectMessage(#[from] DirectMessageRouteError)
 }
 
 pub type RouteResult<T> = Result<T, RouteError>;

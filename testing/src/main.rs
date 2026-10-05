@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, UnestablishedDmSession}, runner::run, stream::Stream};
-use echo_types::{Friend, FriendRequest, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, SendDmMessageData, UnestablishedDmSession}, runner::run, stream::Stream};
+use echo_types::{Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -229,16 +229,6 @@ async fn main() -> Result<()> {
         Ok(())
     }).await?;
 
-    // Alice tries sending Bob a friend request again
-    // Suceeds but checked later so that Alice appears once
-    access_route(&alice_conn, "users.friends.requests.create", async |stream| {
-        stream.send(&bob.id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
     // Test that the friend request appeared for Bob
     access_route(&bob_conn, "users.friends.requests.get", async |stream| {
         let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
@@ -254,7 +244,7 @@ async fn main() -> Result<()> {
     }).await?;
 
     // Bob now accepts Alice's friend request and makes an Olm session.
-    let _bob_to_alice = access_route(&bob_conn, "users.friends.requests.accept", async |stream| {
+    let mut bob_to_alice = access_route(&bob_conn, "users.friends.requests.accept", async |stream| {
         stream.send(&alice.id).await?;
 
         let FriendRequestKeys {
@@ -308,17 +298,8 @@ async fn main() -> Result<()> {
         Ok(())
     }).await?;
 
-    // Alice sends Bob a friend request
-    access_route(&alice_conn, "users.friends.requests.create", async |stream| {
-        stream.send(&bob.id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
     // Alice checks her DM session inbox to fully complete the channel.
-    let _alice_to_bob = access_route(&alice_conn, "inbox.sessions.dm.establish", async |stream| {
+    let mut alice_to_bob = access_route(&alice_conn, "inbox.dm.sessions.establish", async |stream| {
         let mut entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
 
         let UnestablishedDmSession {
@@ -349,6 +330,73 @@ async fn main() -> Result<()> {
 
         Ok(session)
     }).await?;
+
+    // Alice then decides to send Bob a message with her created session.
+    let mut alice_sends_message_to_bob = async |text: &str| {
+        access_route(&alice_conn, "dms.messages.send", async |stream| {
+            let body = MessageBody {
+                content: text.to_string()
+            };
+
+            let secret = Secret::random();
+
+            let key_for_receiver = alice_to_bob.encrypt(secret)?;
+
+            let data = SendDmMessageData {
+                receiver: bob.id,
+                message_body: secret.encrypt(&body),
+                key_for_sender: alice_secret.encrypt(&secret),
+                key_for_receiver
+            };
+
+            stream.send(&data).await?;
+
+            let message: Message = stream.receive::<RouteResult<_>>().await??;
+
+            Ok(message)
+        }).await
+    };
+
+    let alice_message = alice_sends_message_to_bob("hello bob").await?;
+
+    // Bob checks his inbox to read it.
+    access_route(&bob_conn, "inbox.dm.messages.unread", async |stream| {
+        let unresolved: HashMap<SnowflakeID, (SnowflakeID, OlmMessage)> = stream.receive::<RouteResult<_>>().await??;
+
+        let (sender, olm) = &unresolved[&alice_message.id];
+
+        assert_eq!(*sender, alice.id);
+
+        let secret: Secret = bob_to_alice
+            .decrypt(olm)?
+            .as_slice()
+            .try_into()?;
+
+        println!(
+            "bob read from alice: {:?}",
+            secret.decrypt(&alice_message.body)?.content
+        );
+
+        let mut resolved = HashMap::new();
+
+        resolved.insert(alice_message.id, alice_secret.encrypt(&secret));
+
+        stream.send(&resolved).await?;
+
+        stream.receive::<RouteResult<
+            HashMap<SnowflakeID, (SnowflakeID, OlmMessage)>
+        >>().await??;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    // Alice sends Bob an empty message
+    alice_sends_message_to_bob("").await?;
+
+    // Alice sends Bob a massive message (200KB)
+    alice_sends_message_to_bob(&"a".repeat(200_000)).await?;
 
     println!("assertions passed!");
 
