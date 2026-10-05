@@ -52,7 +52,8 @@ macro_rules! fetch_one_scalar {
         query
             .fetch_one($conn)
             .await
-            .context($crate::error::RouteError::Database)?
+            .context($crate::error::RouteError::Database)
+            .attach("error is here")?
     }};
 }
 

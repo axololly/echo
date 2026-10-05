@@ -20,6 +20,9 @@ pub enum RouteError {
     #[error("unknown resource")]
     UnknownResource,
 
+    #[error("route requires authentication")]
+    NeedsAuthentication,
+
     #[error("user route error")]
     User(#[from] UserRouteError)
 }
