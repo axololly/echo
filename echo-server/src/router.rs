@@ -68,6 +68,11 @@ impl EchoRouter {
 
         // Inbox routes
         router.register_route(establish_pending_dm_sessions);
+        router.register_route(process_unread_dm_messages);
+
+        // Direct message routes
+        router.register_route(get_dm_session);
+        router.register_route(send_new_dm_message);
 
         router
     }
