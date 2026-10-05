@@ -4,6 +4,9 @@ pub use asset::*;
 mod id;
 pub use id::*;
 
+mod message;
+pub use message::*;
+
 mod olm;
 pub use olm::*;
 

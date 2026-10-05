@@ -1,8 +1,11 @@
 use quinn::VarInt;
-use rootcause::{Result, prelude::ResultExt};
+use rootcause::{Result, bail, prelude::ResultExt};
 use serde::{Serialize, de::DeserializeOwned};
+use tokio::io::AsyncWriteExt;
 
 use crate::{error::{RouteError, RouteResult}, varint::{AsyncVarintReader, AsyncVarintWriter}};
+
+pub const DATA_TOO_LARGE: VarInt = VarInt::from_u32(100);
 
 /// A wrapper over a QUIC stream that allows for
 /// sending and receiving complex data structures.
@@ -45,6 +48,13 @@ impl Stream {
 
         self
             .sender
+            .flush()
+            .await
+            .context(RouteError::Transport)
+            .attach("while flushing length")?;
+
+        self
+            .sender
             .write_all(&bytes)
             .await
             .context(RouteError::Transport)
@@ -61,6 +71,40 @@ impl Stream {
             .await
             .context(RouteError::Transport)
             .attach("while receiving length")?;
+
+        let mut bytes = vec![0u8; len as usize];
+
+        self
+            .receiver
+            .read_exact(&mut bytes)
+            .await
+            .context(RouteError::Transport)
+            .attach("while receiving main content")?;
+
+        let value = bitcode::deserialize(&bytes)
+            .context(RouteError::InvalidData)
+            .attach(format!("while deserialising data to type {}", std::any::type_name::<T>()))?;
+
+        Ok(value)
+    }
+
+    /// Receive some data over this [`Stream`], but close
+    /// the receiver if more data than `cap` is sent.
+    pub async fn receive_capped<T: DeserializeOwned>(&mut self, cap: u64) -> RouteResult<T> {
+        let len = self
+            .receiver
+            .read_varint()
+            .await
+            .context(RouteError::Transport)
+            .attach("while receiving length")?;
+
+        if len > cap {
+            println!("cap exceeded! {len} (cap: {cap})");
+
+            let _ = self.receiver.stop(DATA_TOO_LARGE);
+
+            bail!(RouteError::DataTooLarge(cap));
+        }
 
         let mut bytes = vec![0u8; len as usize];
 
