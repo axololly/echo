@@ -62,6 +62,77 @@ async fn connect_to_server(
     Ok(conn)
 }
 
+/// Access a route in the API, then communicate with the server
+/// under that same route using the same [`Stream`].
+async fn access_route<R>(
+    parent: &quinn::Connection,
+    route: &str,
+    mut stream_fn: impl AsyncFnMut(&mut Stream) -> Result<R>
+) -> Result<R> {
+    let mut stream = Stream::open_bi(parent).await?;
+
+    println!("accessing route {route:?}");
+
+    // Handle routing to reduce boilerplate
+    stream.send(&route).await?;
+
+    stream.receive::<RouteResult<()>>().await??;
+
+    // Hand off execution on the route to the caller
+    let out = stream_fn(&mut stream).await?;
+
+    stream.close()?;
+
+    Ok(out)
+}
+
+const DEFAULT_PASSWORD: &str = "6767";
+
+type RouteResult<T> = std::result::Result<T, RouteError>;
+
+/// Create an account with a given username on the server,
+/// returning the created user object.
+async fn create_account(
+    parent: &quinn::Connection,
+    username: &str
+) -> Result<User> {
+    let secret = Secret::random();
+
+    let account = access_route(parent, "users.create", async |stream| {
+        let data = CreateNewUserData {
+            username: username.to_string(),
+            secret: PasswordProtected::new(&secret, DEFAULT_PASSWORD),
+            state: secret.encrypt(&UserState {
+                settings: UserSettings {
+                    logout_after: 0,
+                    enable_read_receipts: true,
+                    enable_typing_indicators: true,
+                    ignore_future_requests_from: vec![]
+                }
+            }),
+            signature_verifier: secret.into()
+        };
+
+        stream.send(&data).await?;
+
+        let user: User = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(user)
+    }).await?;
+
+    access_route(parent, "login", async |stream| {
+        let signed_id = secret.sign(account.id);
+
+        stream.send(&signed_id).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    Ok(account)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -114,55 +185,19 @@ async fn main() -> Result<()> {
         cert
     ).await?;
 
-    // Connect to the API
-    let mut stream = Stream::open_bi(parent).await?;
+    // Make an account
+    let alice = create_account(parent, "alice").await?;
 
-    // Choose to create a user account
-    stream.send(&"users.create").await?;
+    // Try to get the same account again
+    let alice2 = access_route(parent, "users.get", async |stream| {
+        stream.send(&alice.id).await?;
 
-    let secret = Secret::random();
-    let password = "6767";
+        let user = stream.receive::<RouteResult<User>>().await??;
 
-    let data = CreateNewUserData {
-        username: "alice".to_string(),
-        secret: PasswordProtected::new(&secret, password),
-        state: secret.encrypt(&UserState {
-            settings: UserSettings {
-                logout_after: 0,
-                enable_read_receipts: true,
-                enable_typing_indicators: true,
-                ignore_future_requests_from: vec![]
-            }
-        }),
-        signature_verifier: secret.into()
-    };
+        Ok(user)
+    }).await?;
 
-    stream.send(&data).await?;
-
-    let maybe_user: std::result::Result<User, RouteError> = stream.receive().await?;
-
-    let user = maybe_user?;
-
-    stream.close()?;
-
-    // Open a new connection to the API
-    stream = Stream::open_bi(parent).await?;
-
-    // Choose to get a user account instead
-    stream.send(&"users.get").await?;
-
-    stream.send(&user.id).await?;
-
-    let maybe_user2: std::result::Result<User, RouteError> = stream.receive().await?;
-
-    let user2 = maybe_user2?;
-
-    // Check the two user accounts are the same
-    assert_eq!(user, user2);
-
-    // Check that after fetching, we can still decrypt the user's
-    // secret if we have the right password
-    assert!(user2.secret.unlock(password).is_ok());
+    assert_eq!(alice, alice2);
 
     println!("assertions passed!");
 

@@ -1,9 +1,11 @@
 use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 
+use echo_types::SnowflakeID;
 use rootcause::{Result, option_ext::OptionExt};
 use sqlx::postgres::PgPool;
 
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
+use tokio::sync::Mutex;
 
 use crate::{router::{EchoContext, EchoRouter}, stream::Stream};
 
@@ -82,6 +84,8 @@ async fn handle_incoming_requests(
     router: Arc<EchoRouter>,
     pool: PgPool
 ) -> Result<()> {
+    let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
+
     loop {
         let mut stream = Stream::accept_bi(&parent).await?;
 
@@ -91,17 +95,31 @@ async fn handle_incoming_requests(
             route_name,
             stream,
             pool: pool.clone(),
-            user: None
+            user: { *authenticated_user.lock().await }
         };
 
-        let result = router.run_with(&mut ctx).await;
+        let authenticated_user = authenticated_user.clone();
+        let router = router.clone();
 
-        if let Err(report) = &result {
-            println!("Error encountered on server: {report:?}");
-        }
+        // Make a new task for each request that gets handled.
+        // This is to allow multiple requests to be handled at the same time.
+        tokio::spawn(async move {
+            let result = router.run_with(&mut ctx).await;
 
-        let stripped = result.map_err(|report| report.into_current_context());
+            if let Err(report) = &result {
+                // For debug purposes
+                println!("Error encountered on server: {report:?}");
+            }
 
-        ctx.stream.send(&stripped).await?;
+            let stripped = result.map_err(|report| report.into_current_context());
+
+            let _ = ctx.stream.send(&stripped).await;
+
+            if ctx.user.is_some() {
+                let mut auth_user = authenticated_user.lock().await;
+
+                *auth_user = ctx.user;
+            }
+        });
     }
 }

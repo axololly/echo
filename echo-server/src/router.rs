@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use echo_types::SnowflakeID;
 use sqlx::postgres::PgPool;
 
-use crate::{auth::validate_user, error::{RouteError, RouteResult}, stream::Stream};
+use crate::{error::{RouteError, RouteResult}, stream::Stream};
 
 /// A route that a client can take through the API.
 ///
@@ -60,6 +60,7 @@ impl EchoRouter {
         // User routes
         router.register_route(get_user);
         router.register_route(create_new_user);
+        router.register_route(login);
 
         router
     }
@@ -70,9 +71,15 @@ impl EchoRouter {
     pub async fn run_with(&self, ctx: &mut EchoContext) -> RouteResult<()> {
         match self.routes.get(ctx.route_name.as_str()) {
             Some(route) => {
-                if route.needs_authentication() {
-                    validate_user(ctx).await?;
+                if route.needs_authentication() && ctx.user.is_none() {
+                    ctx.stream.send(&Err::<(), _>(RouteError::NeedsAuthentication)).await?;
+
+                    return Ok(());
                 }
+
+                let ok: Result<(), ()> = Ok::<_, ()>(());
+
+                ctx.stream.send(&ok).await?;
 
                 route.callback(ctx).await?;
             },
