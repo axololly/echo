@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vodozemac::olm::{OlmMessage, SessionPickle};
 
-use crate::{error::{RouteError as E, RouteResult}, execute, exists, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_opt_scalar, route, router::EchoContext};
 
 /// An error related to direct messaging.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -21,7 +21,7 @@ pub async fn get_dm_session(ctx: &mut EchoContext) -> RouteResult<Encrypted<Sess
 
     let receiver: SnowflakeID = ctx.stream.receive().await?;
 
-    let maybe_session: Option<_> = fetch_opt_scalar!(
+    let maybe_session = fetch_opt_scalar!(
         &ctx.pool,
         "SELECT blob FROM dm_sessions WHERE owner = $1 AND other = $2",
         sender,
@@ -101,6 +101,11 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
     );
 
     tx.commit().await.context(E::Database)?;
+
+    ctx
+        .dispatcher
+        .dispatch([receiver], Event::NewDirectMessageFrom(sender))
+        .await;
 
     Ok(Message {
         id: message_id,

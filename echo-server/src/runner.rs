@@ -7,7 +7,7 @@ use sqlx::postgres::PgPool;
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{router::{EchoContext, EchoRouter}, stream::Stream};
+use crate::{events::EventDispatcher, router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -52,6 +52,8 @@ pub async fn run(
 
     let endpoint = Endpoint::server(config, local_addr)?;
 
+    let event_dispatcher = EventDispatcher::default();
+
     while let Some(inc) = endpoint.accept().await {
         if endpoint.open_connections() >= max_connections {
             inc.refuse();
@@ -69,7 +71,12 @@ pub async fn run(
         let conn = inc.await?;
 
         // Move handling incoming requests out of this thread.
-        tokio::spawn(handle_incoming_requests(conn, router.clone(), pool.clone()));
+        tokio::spawn(handle_incoming_requests(
+            conn,
+            router.clone(),
+            pool.clone(),
+            event_dispatcher.clone()
+        ));
     }
 
     Ok(())
@@ -82,7 +89,8 @@ pub async fn run(
 async fn handle_incoming_requests(
     parent: quinn::Connection,
     router: Arc<EchoRouter>,
-    pool: PgPool
+    pool: PgPool,
+    dispatcher: EventDispatcher
 ) -> Result<()> {
     let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
 
@@ -94,6 +102,7 @@ async fn handle_incoming_requests(
         let mut ctx = EchoContext {
             route_name,
             stream,
+            dispatcher: dispatcher.clone(),
             pool: pool.clone(),
             user: { *authenticated_user.lock().await }
         };
