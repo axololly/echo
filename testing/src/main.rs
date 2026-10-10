@@ -5,7 +5,7 @@ use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
-use echo_server::{error::RouteError, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, SendDmMessageData, UnestablishedDmSession}, runner::run, stream::Stream};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, SendDmMessageData, UnestablishedDmSession}, runner::run, stream::Stream};
 use echo_types::{Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
 use vodozemac::olm::{Account, OlmMessage, SessionConfig};
@@ -124,6 +124,8 @@ async fn create_account(
         Ok(user)
     }).await?;
 
+    println!("created user {username:?} with ID {}", account.id);
+
     access_route(parent, "login", async |stream| {
         let signed_id = secret.sign(account.id);
 
@@ -133,6 +135,38 @@ async fn create_account(
 
         Ok(())
     }).await?;
+
+    let event_listener = async |mut stream: Stream, username: String| -> Result<()> {
+        // Handle routing to reduce boilerplate
+        stream.send(&"events").await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        loop {
+            let event: Event = stream.receive::<RouteResult<_>>().await??;
+
+            match event {
+                Event::NewDirectMessageFrom(user) => {
+                    println!("[event for {username:?}] new DM from {user}");
+                },
+                Event::UserAcceptedFriendRequest(user) => {
+                    println!("[event for {username:?}] {user} accepted the friend request");
+                },
+                Event::NewFriendRequest(user) => {
+                    println!("[event for {username:?}] new friend request from {user}");
+                }
+            }
+        }
+    };
+
+    let stream = Stream::open_bi(parent).await?;
+    let username = username.to_string();
+
+    tokio::spawn(async move {
+        if let Err(e) = event_listener(stream, username).await {
+            println!("Error with receiving events on the client-side: {e:?}");
+        }
+    });
 
     Ok(account)
 }

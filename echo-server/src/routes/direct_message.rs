@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vodozemac::olm::{OlmMessage, SessionPickle};
 
-use crate::{error::{RouteError as E, RouteResult}, execute, exists, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_opt_scalar, route, router::EchoContext};
 
 /// An error related to direct messaging.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -100,6 +100,11 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
     );
 
     tx.commit().await.context(E::Database)?;
+
+    ctx
+        .dispatcher
+        .dispatch([receiver], Event::NewDirectMessageFrom(sender))
+        .await;
 
     Ok(Message {
         id: message_id,
