@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vodozemac::{Curve25519PublicKey, olm::{AccountPickle, PreKeyMessage, SessionPickle}};
 
-use crate::{error::{RouteError as E, RouteResult}, execute, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, ok, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, ok, route, router::EchoContext};
 
 /// An error that specifically occurred in one of the routes in this module.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -266,6 +266,11 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     tx.commit().await.context(E::Database)?;
 
+    ctx
+        .dispatcher
+        .dispatch([receiver], Event::NewFriendRequest(sender))
+        .await;
+
     Ok(())
 }
 
@@ -361,6 +366,11 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     );
 
     tx.commit().await.context(E::Database)?;
+
+    ctx
+        .dispatcher
+        .dispatch([sender], Event::UserAcceptedFriendRequest(receiver))
+        .await;
 
     Ok(())
 }

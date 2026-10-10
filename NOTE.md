@@ -1,1 +1,1 @@
-Add a `account_created` field to the `User` type and the `users` table in the database
+Need to change use of `OFFSET` when going through partially completed DMs in the inbox
