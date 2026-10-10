@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use echo_types::SnowflakeID;
 use sqlx::postgres::PgPool;
 
-use crate::{error::{RouteError, RouteResult}, stream::Stream};
+use crate::{error::{RouteError, RouteResult}, events::EventDispatcher, stream::Stream};
 
 /// A route that a client can take through the API.
 ///
@@ -37,6 +37,7 @@ pub trait EchoRoute: Send + Sync + 'static {
 pub struct EchoContext {
     pub route_name: String,
     pub pool: PgPool,
+    pub dispatcher: EventDispatcher,
     pub stream: Stream,
     pub user: Option<SnowflakeID>
 }
@@ -73,6 +74,9 @@ impl EchoRouter {
         // Direct message routes
         router.register_route(get_dm_session);
         router.register_route(send_new_dm_message);
+
+        // Event listener route
+        router.register_route(listen_to_events);
 
         router
     }
