@@ -17,7 +17,7 @@ CREATE TABLE users (
         CHECK (char_length(name) BETWEEN 3 AND 20),
     display_name TEXT NOT NULL
         CHECK (char_length(display_name) BETWEEN 3 AND 20),
-    avatar "AssetID" NOT NULL,
+    avatar "AssetID",
     activity "Activity" NOT NULL,
     about_me TEXT NOT NULL CHECK (char_length(about_me) <= 2000),
     status TEXT NOT NULL CHECK (char_length(status) <= 200),
@@ -146,8 +146,8 @@ CREATE INDEX idx_dm_messages_receiver ON dm_messages(receiver, id);
 -- (TODO: use this for read receipts?)
 CREATE TABLE message_decryption_keys (
     message_id INT8 REFERENCES dm_messages(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
+         ON UPDATE CASCADE
+         ON DELETE CASCADE,
 
     user_id INT8 REFERENCES users(id)
         ON UPDATE CASCADE
@@ -178,3 +178,53 @@ CREATE TABLE unread_dm_messages (
 );
 
 CREATE INDEX idx_unread_dm_messages_waiting_on ON unread_dm_messages(waiting_on, message_id);
+
+-- Information for a group chat at the database level
+CREATE TABLE groups (
+    id INT8 PRIMARY KEY,
+    name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 30),
+    avatar "AssetID",
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    invite_code TEXT UNIQUE NOT NULL CHECK (invite_code ~ '[0-9A-Z]{8}')
+);
+
+-- All the members in a group chat and when they joined.
+CREATE TABLE group_members (
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (group_id, user_id)
+);
+
+CREATE INDEX idx_group_members_user_id ON group_members(user_id, group_id);
+CREATE INDEX idx_group_members_joined_at ON group_members(group_id, joined_at);
+
+-- Any members that were banned from a group chat.
+CREATE TABLE group_banned_members (
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    member_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    banned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    reason TEXT,
+
+    PRIMARY KEY (group_id, member_id)
+);
+
+CREATE INDEX idx_group_banned_members_member_id ON group_banned_members(member_id, group_id);

@@ -10,6 +10,7 @@ chrono = "0.4.45"
 echo-server-derive = { path = "../echo-server-derive" }
 echo-types = { path = "../echo-types" }
 quinn = "0.11.12"
+rand = "0.10.3"
 rootcause = "0.13.0"
 serde = "1.0.229"
 sqlx = { version = "0.9.0", features = ["chrono", "postgres", "runtime-tokio"] }

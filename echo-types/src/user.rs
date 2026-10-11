@@ -60,7 +60,7 @@ pub struct User {
     pub id: SnowflakeID,
     pub name: String,
     pub display_name: String,
-    pub avatar: AssetID,
+    pub avatar: Option<AssetID>,
     pub activity: Activity,
     pub status: String,
     pub about_me: String,

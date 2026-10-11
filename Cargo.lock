@@ -630,6 +630,7 @@ dependencies = [
  "echo-server-derive",
  "echo-types",
  "quinn",
+ "rand",
  "rootcause",
  "serde",
  "sqlx",
@@ -787,8 +788,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee93edf3c501f0035bbeffeccfed0b79e14c311f12195ec0e661e114a0f60da4"
 dependencies = [
  "portable-atomic",
- "rand",
- "serde",
  "web-time",
 ]
 
