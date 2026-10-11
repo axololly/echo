@@ -1,7 +1,7 @@
-use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
+use std::{net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, SendDmMessageData, UnestablishedDmSession}, runner::run, stream::Stream};
-use echo_types::{Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{BanMemberData, CreateFriendRequestData, CreateNewGroupData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, GroupAppearanceUpdateData, GroupRouteError, KickMemberData, UnbanMemberData}, runner::run, stream::Stream};
+use echo_types::{BannedMember, Group, PasswordProtected, Secret, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -81,8 +81,6 @@ async fn access_route<R>(
 
     // Hand off execution on the route to the caller
     let out = stream_fn(&mut stream).await?;
-
-    println!("finished accessing route {route:?}");
 
     stream.close()?;
 
@@ -177,6 +175,73 @@ async fn connect_and_create_account(
     Ok((account, parent))
 }
 
+/// Form a friend request between two users
+async fn establish_friendship(
+    user1_data: (&quinn::Connection, &User),
+    user2_data: (&quinn::Connection, &User)
+) -> Result<()> {
+    let (conn1, user1) = user1_data;
+    let (conn2, user2) = user2_data;
+
+    access_route(conn1, "users.friends.requests.create", async |stream| {
+        let secret = user1.secret.unlock(DEFAULT_PASSWORD)?;
+        let mut olm: Account = secret.decrypt(&user1.olm_account)?.into();
+
+        let result = olm.generate_one_time_keys(1);
+
+        olm.mark_keys_as_published();
+
+        let one_time_key = result.created[0];
+
+        let data = CreateFriendRequestData {
+            receiver: user2.id,
+            one_time_key,
+            new_account: secret.encrypt(&olm.pickle())
+        };
+
+        stream.send(&data).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    access_route(conn2, "users.friends.requests.accept", async |stream| {
+        let secret = user2.secret.unlock(DEFAULT_PASSWORD)?;
+        let olm: Account = secret.decrypt(&user2.olm_account)?.into();
+
+        stream.send(&user1.id).await?;
+
+        let FriendRequestKeys {
+            public_key,
+            one_time_key
+        } = stream.receive::<RouteResult<_>>().await??;
+
+        let mut session = olm.create_outbound_session(
+            SessionConfig::version_1(),
+            public_key,
+            one_time_key
+        )?;
+
+        let OlmMessage::PreKey(pre_key_message) = session.encrypt([])? else {
+            unreachable!()
+        };
+
+        let data = FriendRequestSessionData {
+            session: secret.encrypt(&session.pickle()),
+            pre_key_message
+        };
+
+        stream.send(&data).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(session)
+    }).await?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -226,201 +291,158 @@ async fn main() -> Result<()> {
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
 
-    let alice_secret = alice.secret.unlock(DEFAULT_PASSWORD)?;
-    let mut alice_olm: Account = alice_secret.decrypt(&alice.olm_account)?.into();
+    // Alice and Bob become friends
+    establish_friendship(
+        (&alice_conn, &alice),
+        (&bob_conn, &bob)
+    ).await?;
 
-    let bob_secret = bob.secret.unlock(DEFAULT_PASSWORD)?;
-    let bob_olm: Account = bob_secret.decrypt(&bob.olm_account)?.into();
+    // Chloe joins the service
+    let (chloe, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
 
-    // Alice sends Bob a friend request
-    access_route(&alice_conn, "users.friends.requests.create", async |stream| {
-        let result = alice_olm.generate_one_time_keys(1);
-
-        alice_olm.mark_keys_as_published();
-
-        let one_time_key = result.created[0];
-
-        let data = CreateFriendRequestData {
-            receiver: bob.id,
-            one_time_key,
-            new_account: alice_secret.encrypt(&alice_olm.pickle())
+    // Alice creates a group with Bob in it
+    let alice_group = access_route(&alice_conn, "groups.create", async |stream| {
+        let data = CreateNewGroupData {
+            name: Some("alice's group chat".to_string()),
+            initial_members: vec![bob.id]
         };
 
         stream.send(&data).await?;
 
-        stream.receive::<RouteResult<()>>().await??;
+        let group: Group = stream.receive::<RouteResult<_>>().await??;
 
-        Ok(())
+        Ok(group)
     }).await?;
 
-    // Test that the friend request appeared for Bob
-    access_route(&bob_conn, "users.friends.requests.get", async |stream| {
-        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
+    // Chloe now joins Alice's group
+    let chloe_joins_group = async || -> Result<Group> {
+        access_route(&chloe_conn, "groups.join", async |stream| {
+            stream.send(&alice_group.invite_code).await?;
 
-        dbg!(&requests);
+            let group: Group = stream.receive::<RouteResult<_>>().await??;
 
-        assert_eq!(
-            requests.iter().filter(|req| req.sender == alice.id).count(), 1,
-            "bob did not get one friend request from alice"
-        );
-
-        Ok(())
-    }).await?;
-
-    // Bob now accepts Alice's friend request and makes an Olm session.
-    let mut bob_to_alice = access_route(&bob_conn, "users.friends.requests.accept", async |stream| {
-        stream.send(&alice.id).await?;
-
-        let FriendRequestKeys {
-            public_key,
-            one_time_key
-        } = stream.receive::<RouteResult<_>>().await??;
-
-        let mut session = bob_olm.create_outbound_session(
-            SessionConfig::version_1(),
-            public_key,
-            one_time_key
-        )?;
-
-        let OlmMessage::PreKey(pre_key_message) = session.encrypt([])? else {
-            unreachable!()
-        };
-
-        let data = FriendRequestSessionData {
-            session: bob_secret.encrypt(&session.pickle()),
-            pre_key_message
-        };
-
-        stream.send(&data).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(session)
-    }).await?;
-
-    // Alice checks her friends list to check Bob is in there
-    access_route(&alice_conn, "users.friends.get", async |stream| {
-        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
-
-        assert!(
-            friends.iter().any(|f| f.id == bob.id),
-            "alice did not get bob as a friend"
-        );
-
-        Ok(())
-    }).await?;
-
-    // Bob checks his friends list to check Alice is in there once
-    access_route(&bob_conn, "users.friends.get", async |stream| {
-        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
-
-        assert!(
-            friends.iter().any(|f| f.id == alice.id),
-            "bob did not get alice as a friend once"
-        );
-
-        Ok(())
-    }).await?;
-
-    // Alice checks her DM session inbox to fully complete the channel.
-    let mut alice_to_bob = access_route(&alice_conn, "inbox.dm.sessions.establish", async |stream| {
-        let mut entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
-
-        let UnestablishedDmSession {
-            user_olm_public_key,
-            pre_key_message
-        } = &entries[&bob.id];
-
-        let session = alice_olm.create_inbound_session(
-            SessionConfig::version_1(),
-            *user_olm_public_key,
-            pre_key_message
-        )?.session;
-
-        let mut sessions = HashMap::new();
-
-        sessions.insert(bob.id, alice_secret.encrypt(&session.pickle()));
-
-        stream.send(&sessions).await?;
-
-        stream.send(&alice_secret.encrypt(&alice_olm.pickle())).await?;
-
-        #[allow(unused_assignments)]
-        {
-            entries = stream.receive::<RouteResult<_>>().await??;
-        }
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(session)
-    }).await?;
-
-    // Alice then decides to send Bob a message with her created session.
-    let mut alice_sends_message_to_bob = async |text: &str| {
-        access_route(&alice_conn, "dms.messages.send", async |stream| {
-            let body = MessageBody {
-                content: text.to_string()
-            };
-
-            let secret = Secret::random();
-
-            let key_for_receiver = alice_to_bob.encrypt(secret)?;
-
-            let data = SendDmMessageData {
-                receiver: bob.id,
-                message_body: secret.encrypt(&body),
-                key_for_sender: alice_secret.encrypt(&secret),
-                key_for_receiver
-            };
-
-            stream.send(&data).await?;
-
-            let message: Message = stream.receive::<RouteResult<_>>().await??;
-
-            Ok(message)
+            Ok(group)
         }).await
     };
 
-    let alice_message = alice_sends_message_to_bob("hello bob").await?;
+    chloe_joins_group().await?;
 
-    // Bob checks his inbox to read it.
-    access_route(&bob_conn, "inbox.dm.messages.unread", async |stream| {
-        let unresolved: HashMap<SnowflakeID, (SnowflakeID, OlmMessage)> = stream.receive::<RouteResult<_>>().await??;
-
-        let (sender, olm) = &unresolved[&alice_message.id];
-
-        assert_eq!(*sender, alice.id);
-
-        let secret: Secret = bob_to_alice
-            .decrypt(olm)?
-            .as_slice()
-            .try_into()?;
-
-        println!(
-            "bob read from alice: {:?}",
-            secret.decrypt(&alice_message.body)?.content
-        );
-
-        let mut resolved = HashMap::new();
-
-        resolved.insert(alice_message.id, alice_secret.encrypt(&secret));
-
-        stream.send(&resolved).await?;
-
-        stream.receive::<RouteResult<
-            HashMap<SnowflakeID, (SnowflakeID, OlmMessage)>
-        >>().await??;
+    // Alice changes the group's name
+    access_route(&alice_conn, "groups.appearance.edit", async |stream| {
+        stream.send(&GroupAppearanceUpdateData {
+            group_id: alice_group.id,
+            new_name: Some("the squad".to_string()),
+            new_avatar: None
+        }).await?;
 
         stream.receive::<RouteResult<()>>().await??;
 
         Ok(())
     }).await?;
 
-    // Alice sends Bob an empty message
-    alice_sends_message_to_bob("").await?;
+    // Bob gets the new group state to see if
+    // Chloe was correctly added and if Alice
+    // changed the group name successfully.
+    let bob_group = access_route(&bob_conn, "groups.get", async |stream| {
+        stream.send(&alice_group.id).await?;
 
-    // Alice sends Bob a massive message (200KB)
-    alice_sends_message_to_bob(&"a".repeat(200_000)).await?;
+        let group: Group = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            group.members.iter().find(|m| m.user_id == chloe.id).is_some(),
+            "chloe was not added as a member to the group"
+        );
+
+        assert_eq!(
+            group.name, "the squad",
+            "the group chat did not have its name changed"
+        );
+
+        Ok(group)
+    }).await?;
+
+    // Bob decides to leave the shared group
+    access_route(&bob_conn, "groups.leave", async |stream| {
+        stream.send(&bob_group.id).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    // Alice decides to kick Chloe
+    access_route(&alice_conn, "groups.members.kick", async |stream| {
+        stream.send(&KickMemberData {
+            group_id: alice_group.id,
+            member_id: chloe.id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    // Check that Chloe can still join back
+    chloe_joins_group().await?;
+
+    let ban_reason = "for testing purposes";
+
+    // Alice decides to ban Chloe
+    access_route(&alice_conn, "groups.members.ban", async |stream| {
+        stream.send(&BanMemberData {
+            group_id: alice_group.id,
+            member_id: chloe.id,
+            reason: Some(ban_reason.to_string())
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    // Check that Chloe cannot join back because she is banned
+    match chloe_joins_group().await {
+        Ok(_) => panic!("chloe could still join the group, even when she was banned"),
+        Err(report) => {
+            let err = report
+                .downcast_report::<RouteError>()?
+                .into_current_context();
+
+            let RouteError::Group(GroupRouteError::MemberIsBanned { reason, ..  }) = err else {
+                unreachable!("another error type was found: {err:?}");
+            };
+
+            assert_eq!(reason.as_deref(), Some(ban_reason));
+        }
+    }
+
+    // Alice checks the ban list to ensure Chloe is in it
+    access_route(&alice_conn, "groups.members.banned.get", async |stream| {
+        stream.send(&alice_group.id).await?;
+
+        let ban_list: Vec<BannedMember> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            ban_list.iter().find(|m| m.member_id == chloe.id).is_some(),
+            "chloe was not found on the ban list"
+        );
+
+        Ok(())
+    }).await?;
+
+    // Alice unbans Chloe
+    access_route(&alice_conn, "groups.members.unban", async |stream| {
+        stream.send(&UnbanMemberData {
+            group_id: alice_group.id,
+            member_id: chloe.id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    chloe_joins_group().await?;
 
     println!("assertions passed!");
 

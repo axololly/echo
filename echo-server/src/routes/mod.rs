@@ -4,6 +4,9 @@ pub use direct_message::*;
 mod events;
 pub use events::*;
 
+mod group;
+pub use group::*;
+
 mod inbox;
 pub use inbox::*;
 
