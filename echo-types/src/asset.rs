@@ -1,4 +1,4 @@
-use std::{fmt::{Debug, Display}, sync::LazyLock};
+use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgArgumentBuffer, PgTypeInfo, PgValueRef};
@@ -61,8 +61,3 @@ impl AssetID {
         Self(*hash.as_bytes())
     }
 }
-
-// TODO: needs to be added to the database in some setup function
-pub static DEFAULT_PFP_ASSET_ID: LazyLock<AssetID> = LazyLock::new(|| {
-    AssetID::from_bytes(include_bytes!("../../default-pfp.jpeg"))
-});

@@ -1,6 +1,9 @@
 mod asset;
 pub use asset::*;
 
+mod group;
+pub use group::*;
+
 mod id;
 pub use id::*;
 
