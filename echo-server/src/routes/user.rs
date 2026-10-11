@@ -1,4 +1,4 @@
-use echo_types::{Activity, DEFAULT_PFP_ASSET_ID, Encrypted, Friend, FriendRequest, OlmPreKeyMessage, OlmPublicKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserState};
+use echo_types::{Activity, Encrypted, Friend, FriendRequest, OlmPreKeyMessage, OlmPublicKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserState};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -6,7 +6,7 @@ use vodozemac::{Curve25519PublicKey, olm::{AccountPickle, PreKeyMessage, Session
 
 use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, ok, route, router::EchoContext};
 
-/// An error that specifically occurred in one of the routes in this module.
+/// An error related to users.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum UserRouteError {
     #[error("authentication failed")]
@@ -121,7 +121,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         id,
         name: username.clone(),
         display_name: username,
-        avatar: *DEFAULT_PFP_ASSET_ID,
+        avatar: None,
         activity: Activity::Online,
         about_me: String::new(),
         status: String::new(),

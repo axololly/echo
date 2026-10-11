@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::{Deref, DerefMut}, sync::Arc};
 
-use echo_types::SnowflakeID;
+use echo_types::{AssetID, SnowflakeID};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
 
@@ -15,7 +15,25 @@ pub enum Event {
     UserAcceptedFriendRequest(SnowflakeID),
 
     /// New DM message
-    NewDirectMessageFrom(SnowflakeID)
+    NewDirectMessageFrom(SnowflakeID),
+
+    /// Group chat appearance updated
+    GroupAppearanceUpdated {
+        new_name: Option<String>,
+        new_avatar: Option<AssetID>
+    },
+
+    /// Member joined the group chat
+    MemberJoinedGroup {
+        group_id: SnowflakeID,
+        member_id: SnowflakeID
+    },
+
+    /// Member left the group chat
+    MemberLeftGroup {
+        group_id: SnowflakeID,
+        member_id: SnowflakeID
+    }
 }
 
 type Notifier = UnboundedSender<Arc<Event>>;
@@ -84,7 +102,11 @@ impl EventDispatcher {
     }
 
     /// Dispatch an event to a specific set of listeners.
-    pub async fn dispatch(&self, to: impl IntoIterator<Item = SnowflakeID>, event: Event) {
+    pub async fn dispatch(
+        &self,
+        to: impl IntoIterator<Item = SnowflakeID>,
+        event: Event
+    ) {
         let mut notifiers = self.notifiers.lock().await;
 
         let event = Arc::new(event);
@@ -96,6 +118,29 @@ impl EventDispatcher {
 
             // Notify this sender about the new event.
             let result = notifier.send(event.clone());
+
+            // No more listeners for this sender, so we can discard it.
+            if result.is_err() {
+                notifiers.remove(&id);
+            }
+        }
+    }
+
+    /// Dispatch an [`Event`] that is dependent on a member's ID.
+    pub async fn dispatch_contextual(
+        &self,
+        to: impl IntoIterator<Item = SnowflakeID>,
+        event_fn: impl Fn(SnowflakeID) -> Event
+    ) {
+        let mut notifiers = self.notifiers.lock().await;
+
+        for id in to {
+            let Some(notifier) = notifiers.get(&id) else {
+                continue;
+            };
+
+            // Notify this sender about the new event.
+            let result = notifier.send(Arc::new(event_fn(id)));
 
             // No more listeners for this sender, so we can discard it.
             if result.is_err() {
