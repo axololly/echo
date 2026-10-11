@@ -78,6 +78,18 @@ impl EchoRouter {
         // Event listener route
         router.register_route(listen_to_events);
 
+        // Group routes
+        router.register_route(create_new_group);
+        router.register_route(get_group);
+        router.register_route(update_group_appearance);
+        router.register_route(join_group);
+        router.register_route(leave_group);
+        router.register_route(kick_group_member);
+        router.register_route(ban_group_member);
+        router.register_route(unban_group_member);
+        router.register_route(get_banned_members_list);
+        router.register_route(rotate_group_invite_code);
+
         router
     }
 

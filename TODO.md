@@ -1,0 +1,5 @@
+- Add a `account_created` field to the `User` type and the `users` table in the database
+- Remove the length enforcements on the database and enforce them at the route level
+- Add automatically rotating the invite link when a user gets banned
+- Add a minimum age for group members (you can't join a group if your account was made less than 2 weeks ago)
+- Route to add a friend to a group chat
