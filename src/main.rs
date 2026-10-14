@@ -2,6 +2,7 @@
 
 use std::{marker::PhantomData, ops::Deref};
 
+use argon2::Argon2;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::Aead};
 use hex_literal::hex;
 use hkdf::Hkdf;
@@ -69,8 +70,8 @@ struct Encrypted<T> {
 }
 
 /// An error related to decryption.
-#[derive(Clone, Copy, Debug)]
-enum DecryptionError {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DecryptionError {
     /// Cannot decrypt the data
     UnableToDecrypt,
     /// Decrypted data could not be deserialised
@@ -160,14 +161,78 @@ impl<T> Deref for Signed<T> {
     }
 }
 
+/// A password-protected value.
+pub struct PasswordProtected<T> {
+    enc: Encrypted<T>,
+    salt: [u8; 16]
+}
+
+fn construct_argon2() -> Argon2<'static> {
+    let params = argon2::Params::new(
+        64, // 64KB memory cost
+        3, // iterations
+        4, // parallelism
+        Some(32)
+    ).expect("invalid argon2 parameters");
+
+    Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        params
+    )
+}
+
+impl<T: DeserializeOwned + Serialize> PasswordProtected<T> {
+    /// Create a new password-protected value.
+    pub fn new(value: &T, password: &str) -> Self {
+        let argon2 = construct_argon2();
+
+        let salt: [u8; 16] = rand::random();
+
+        let mut out = [0; 32];
+
+        argon2.hash_password_into(
+            password.as_bytes(),
+            &salt,
+            &mut out
+        ).expect("argon2 failed");
+
+        let secret = Secret(out);
+
+        let enc = secret.encrypt(value);
+
+        Self { enc, salt }
+    }
+
+    /// Unlock this [`PasswordProtected`] struct with the
+    /// given password.
+    pub fn unlock(&self, password: &str) -> Result<T, DecryptionError> {
+        let argon2 = construct_argon2();
+
+        let mut out = [0; 32];
+
+        argon2.hash_password_into(
+            password.as_bytes(),
+            &self.salt,
+            &mut out
+        ).expect("argon2 failed");
+
+        let secret = Secret(out);
+
+        secret.decrypt(&self.enc)
+    }
+}
+
 fn main() {
-    let secret = Secret::random();
+    let num = 5;
 
-    let num = 15;
+    let right_password = "hunter42";
+    let wrong_password = "hunter43";
 
-    let signed_num = secret.sign(num);
+    let pwd_num = PasswordProtected::new(&num, right_password);
 
-    assert!(secret.verify(&signed_num));
+    assert_eq!(pwd_num.unlock(right_password), Ok(num));
+    assert_eq!(pwd_num.unlock(wrong_password), Err(DecryptionError::UnableToDecrypt));
 
-    println!("original number: {}", *signed_num);
+    println!("assertions passed!");
 }
