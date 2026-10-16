@@ -300,7 +300,7 @@ async fn main() -> Result<()> {
 
     // Alice checks her DM session inbox to fully complete the channel.
     let _alice_to_bob = access_route(&alice_conn, "inbox.sessions.dm.establish", async |stream| {
-        let entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
+        let mut entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
 
         let UnestablishedDmSession {
             user_olm_public_key,
@@ -320,6 +320,11 @@ async fn main() -> Result<()> {
         stream.send(&sessions).await?;
 
         stream.send(&alice_secret.encrypt(&alice_olm.pickle())).await?;
+
+        #[allow(unused_assignments)]
+        {
+            entries = stream.receive::<RouteResult<_>>().await??;
+        }
 
         stream.receive::<RouteResult<()>>().await??;
 
