@@ -27,7 +27,7 @@ pub struct UnestablishedDmSession {
 pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
-    let mut offset: i64 = 0;
+    let mut last_user_id = SnowflakeID::MAX;
     let per_page: i64 = 50;
 
     let stmt = "
@@ -38,8 +38,9 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
         FROM pending_dm_sessions pdms
         INNER JOIN users u ON pdms.other = u.id
         WHERE pdms.waiting_on = $1
-        LIMIT $2
-        OFFSET $3
+        AND pdms.other < $2
+        ORDER BY pdms.other DESC
+        LIMIT $3
     ";
 
     loop {
@@ -47,9 +48,13 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
             &ctx.pool,
             stmt,
             user,
-            per_page,
-            offset
+            last_user_id,
+            per_page
         );
+
+        if let Some(&(user_id, ..)) = rows.last() {
+            last_user_id = user_id;
+        }
 
         let entries: HashMap<SnowflakeID, UnestablishedDmSession> = rows
             .into_iter()
@@ -102,8 +107,6 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
         );
 
         tx.commit().await.context(E::Database)?;
-
-        offset += per_page;
     }
 
     Ok(())
@@ -113,7 +116,7 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
 pub async fn process_unread_dm_messages(ctx: &mut EchoContext) -> RouteResult<()> {
     let user = ctx.user.unwrap();
 
-    let mut offset: i64 = 0;
+    let mut last_message_id = SnowflakeID::MAX;
     let per_page: i64 = 50;
 
     let stmt = "
@@ -124,8 +127,9 @@ pub async fn process_unread_dm_messages(ctx: &mut EchoContext) -> RouteResult<()
         FROM unread_dm_messages umsg
         INNER JOIN dm_messages msg ON msg.id = umsg.message_id
         WHERE umsg.waiting_on = $1
-        LIMIT $2
-        OFFSET $3
+        AND msg.id < $2
+        ORDER BY msg.id DESC
+        LIMIT $3
     ";
 
     loop {
@@ -137,9 +141,13 @@ pub async fn process_unread_dm_messages(ctx: &mut EchoContext) -> RouteResult<()
             &ctx.pool,
             stmt,
             user,
-            per_page,
-            offset
+            last_message_id,
+            per_page
         );
+
+        if let Some(&(message_id, ..)) = rows.last() {
+            last_message_id = message_id;
+        }
 
         let entries: HashMap<SnowflakeID, (SnowflakeID, OlmMessage)> = rows
             .into_iter()
@@ -173,8 +181,6 @@ pub async fn process_unread_dm_messages(ctx: &mut EchoContext) -> RouteResult<()
         }
 
         tx.commit().await.context(E::Database)?;
-
-        offset += per_page;
     }
 
     Ok(())

@@ -176,3 +176,5 @@ CREATE TABLE unread_dm_messages (
 
     PRIMARY KEY (message_id, waiting_on)
 );
+
+CREATE INDEX idx_unread_dm_messages_waiting_on ON unread_dm_messages(waiting_on, message_id);
