@@ -16,6 +16,10 @@ const MACHINE_ID_BITS: usize = 10;
 const SEQUENCE_NUM_BITS: usize = 12;
 
 impl SnowflakeID {
+    pub const MAX: Self = Self {
+        id: i64::MAX
+    };
+
     /// Make a snowflake ID from raw components.
     pub const fn from_components(
         timestamp: i64,
