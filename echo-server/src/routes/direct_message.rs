@@ -97,7 +97,7 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
 
     execute!(
         &mut *tx,
-        "INSERT INTO unread_dm_messages (message_id, waiting_on, blob) VALUES ($1, $2, $3)",
+        "INSERT INTO pending_dm_message_keys (message_id, waiting_on, blob) VALUES ($1, $2, $3)",
         message_id,
         receiver,
         SqlxOlmMessage::from(key_for_receiver)
