@@ -99,8 +99,6 @@ impl Stream {
             .attach("while receiving length")?;
 
         if len > cap {
-            println!("cap exceeded! {len} (cap: {cap})");
-
             let _ = self.receiver.stop(DATA_TOO_LARGE);
 
             bail!(RouteError::DataTooLarge(cap));
