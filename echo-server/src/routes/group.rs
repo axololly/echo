@@ -1,10 +1,13 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{AssetID, BannedMember, Group, GroupInvite, GroupMember, SNOWFLAKE_GEN, SnowflakeID};
-use rootcause::{bail, prelude::ResultExt};
+use echo_types::{__convert_encrypted_to_crypto_box, AssetID, BannedMember, BoxPublicKey, CryptoBox, Encrypted, Group, GroupInvite, GroupMember, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use vodozemac::{megolm::{GroupSessionPickle, MegolmMessage, SessionKey}};
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
 
 /// An error related to groups.
 #[derive(Clone, Debug, Deserialize, Error, Serialize)]
@@ -28,7 +31,10 @@ pub enum GroupRouteError {
     MemberIsBanned {
         when: DateTime<Utc>,
         reason: Option<String>
-    }
+    },
+
+    #[error("no megolm session for this epoch")]
+    NoMegolmSession
 }
 
 use GroupRouteError as G;
@@ -389,12 +395,26 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         bail!(E::Group(G::MemberIsBanned { when, reason }));
     }
 
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
     execute!(
-        &ctx.pool,
+        &mut *tx,
         "INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)",
         group_id,
         user_id
     );
+
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        group_id
+    );
+
+    tx.commit().await.context(E::Database)?;
 
     let members_data: Vec<(SnowflakeID, DateTime<Utc>)> = fetch_all_as!(
         &ctx.pool,
@@ -472,6 +492,12 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         ).await;
     }
 
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        group_id
+    );
+
     tx.commit().await.context(E::Database)?;
 
     Ok(())
@@ -506,6 +532,12 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::Group(G::ActionForbidden));
     }
 
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
     let stmt = "
         DELETE FROM group_members
         WHERE group_id = $1
@@ -513,10 +545,16 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
     ";
 
     execute!(
-        &ctx.pool,
+        &mut *tx,
         stmt,
         group_id,
         member_id
+    );
+
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        group_id
     );
 
     dispatch_event_for_group(ctx, group_id, Event::MemberLeftGroup {
@@ -591,6 +629,12 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         group_id,
         member_id,
         reason
+    );
+
+    execute!(
+        &mut *tx,
+        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        group_id
     );
 
     tx.commit().await.context(E::Database)?;
@@ -703,4 +747,325 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Grou
     ).await?;
 
     Ok(new_invite)
+}
+
+/// A single group chat member's session,
+/// packaging their outbound session and
+/// the inbound sessions of all other members.
+#[derive(Deserialize, Serialize)]
+pub struct GroupChatSession {
+    pub outbound: Encrypted<GroupSessionPickle>,
+    pub inbounds: HashMap<SnowflakeID, CryptoBox<SessionKey>>
+}
+
+#[route("groups.sessions.get")]
+pub async fn get_latest_group_chat_session(ctx: &mut EchoContext) -> RouteResult<GroupChatSession> {
+    let group_id: SnowflakeID = ctx.stream.receive().await?;
+
+    if !is_group_member(ctx, group_id).await? {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let user_id = ctx.user.unwrap();
+
+    let stmt = "
+        SELECT
+            gsk.receiver,
+            gsk.blob
+        FROM group_session_keys gsk
+        INNER JOIN groups g
+            ON g.id = gsk.group_id
+            AND g.epoch = gsk.epoch
+        WHERE g.id = $1
+        AND gsk.sender = $2
+    ";
+
+    let rows: Vec<(SnowflakeID, Encrypted<GroupSessionPickle>)> = fetch_all_as!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        user_id
+    );
+
+    let mut outbound = None;
+
+    let mut inbounds = HashMap::new();
+
+    let mut members = get_group_members(ctx, group_id)
+        .await?
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    for (receiver, enc) in rows {
+        if !members.remove(&receiver) {
+            continue;
+        }
+
+        if receiver == user_id {
+            outbound = Some(enc);
+        }
+        else {
+            let key = __convert_encrypted_to_crypto_box(enc)
+                .cast::<SessionKey>();
+
+            inbounds.insert(receiver, key);
+        }
+    }
+
+    let err = E::Group(G::NoMegolmSession);
+
+    if !members.is_empty() {
+        bail!(err);
+    }
+
+    let outbound = outbound.context(err)?;
+
+    let session = GroupChatSession {
+        outbound,
+        inbounds
+    };
+
+    Ok(session)
+}
+
+#[route("groups.sessions.ensure")]
+pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<()> {
+    let group_id: SnowflakeID = ctx.stream.receive().await?;
+
+    if !is_group_member(ctx, group_id).await? {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let user_id = ctx.user.unwrap();
+
+    let epoch: i64 = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT epoch FROM groups WHERE id = $1",
+        group_id
+    );
+
+    let stmt = "
+        SELECT receiver
+        FROM group_session_keys
+        WHERE group_id = $1
+        AND sender = $2
+        AND epoch = $3
+    ";
+
+    let other_members: Vec<SnowflakeID> = fetch_all_scalar!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        user_id,
+        epoch
+    );
+
+    if !other_members.is_empty() {
+        ctx.stream.send(ok!(false)).await?;
+
+        return Ok(());
+    }
+
+    ctx.stream.send(ok!(true)).await?;
+
+    let stmt = "
+        SELECT
+            gm.user_id,
+            upk.box_public_key
+        FROM group_members gm
+        INNER JOIN users_public_keys upk
+            ON upk.user_id = gm.user_id
+        WHERE gm.group_id = $1
+        AND gm.user_id != $2
+    ";
+
+    let raw_other_members: Vec<(SnowflakeID, BoxPublicKey)> = fetch_all_as!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        user_id
+    );
+
+    let mut other_members: HashMap<SnowflakeID, BoxPublicKey> = raw_other_members
+        .into_iter()
+        .collect();
+
+    ctx.stream.send(ok!(other_members)).await?;
+
+    let session: GroupChatSession = ctx.stream.receive().await?;
+
+    other_members.retain(|id, _| !session.inbounds.contains_key(id));
+
+    if !other_members.is_empty() {
+        bail!(E::InvalidData);
+    }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    let stmt = "
+        INSERT INTO group_session_keys (
+            group_id,
+            epoch,
+            sender,
+            receiver,
+            blob
+        ) VALUES ($1, $2, $3, $4, $5)
+    ";
+
+    execute!(
+        &mut *tx,
+        stmt,
+        group_id,
+        epoch,
+        user_id,
+        user_id,
+        session.outbound
+    );
+
+    for (member_id, session_key) in session.inbounds {
+        execute!(
+            &mut *tx,
+            stmt,
+            group_id,
+            epoch,
+            user_id,
+            member_id,
+            session_key
+        );
+    }
+
+    tx.commit().await.context(E::Database)?;
+
+    Ok(())
+}
+
+/// Data necessary for sending a message into a group.
+///
+/// This requires a Megolm session to have been uploaded to the
+/// server prior to accessing this route.
+#[derive(Deserialize, Serialize)]
+pub struct SendGroupMessageData {
+    pub group_id: SnowflakeID,
+    pub replied_to: Option<SnowflakeID>,
+    pub message_body: Encrypted<MessageBody>,
+    pub key_for_author: Encrypted<Secret>,
+    pub key_for_others: MegolmMessage
+}
+
+#[route("groups.messages.send")]
+pub async fn send_group_message(ctx: &mut EchoContext) -> RouteResult<Message> {
+    let author_id = ctx.user.unwrap();
+
+    let SendGroupMessageData {
+        group_id,
+        replied_to,
+        message_body,
+        key_for_author,
+        key_for_others
+    } = ctx.stream.receive().await?;
+
+    if !is_group_member(ctx, group_id).await? {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let epoch: i64 = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT epoch FROM groups WHERE id = $1",
+        group_id
+    );
+
+    let message_id = SNOWFLAKE_GEN.next();
+
+    let members = get_group_members(ctx, group_id).await?;
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    let stmt = "
+        INSERT INTO group_messages (
+            id,
+            group_id,
+            parent_id,
+            author,
+            blob
+        ) VALUES ($1, $2, $3, $4, $5)
+    ";
+
+    execute!(
+        &mut *tx,
+        stmt,
+        message_id,
+        group_id,
+        replied_to,
+        author_id,
+        &message_body
+    );
+
+    let stmt = "
+        INSERT INTO message_decryption_keys (
+            message_id,
+            user_id,
+            blob
+        ) VALUES ($1, $2, $3)
+    ";
+
+    execute!(
+        &mut *tx,
+        stmt,
+        message_id,
+        author_id,
+        key_for_author
+    );
+
+    let stmt = "
+        INSERT INTO pending_group_message_keys (
+            message_id,
+            recipient,
+            epoch,
+            blob
+        ) VALUES ($1, $2, $3, $4)
+    ";
+
+    let key_for_others = SqlxMegolmMessage::from(key_for_others);
+
+    for member_id in members {
+        if member_id == author_id {
+            continue;
+        }
+
+        execute!(
+            &mut *tx,
+            stmt,
+            message_id,
+            member_id,
+            epoch,
+            &key_for_others
+        );
+    }
+
+    tx.commit().await.context(E::Database)?;
+
+    dispatch_event_for_group(
+        ctx,
+        group_id,
+        Event::NewGroupMessage {
+            group_id,
+            message_id,
+            author_id
+        }
+    ).await?;
+
+    Ok(Message {
+        id: message_id,
+        replied_to,
+        author: author_id,
+        body: message_body
+    })
 }
