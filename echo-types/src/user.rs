@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Decode, Encode, postgres::PgTypeInfo, prelude::FromRow};
 use vodozemac::olm::AccountPickle;
 
-use crate::{AssetID, Encrypted, OlmPublicKey, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
+use crate::{AssetID, BoxPublicKey, Encrypted, OlmPublicKey, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
 
 /// The activity status of a given user.
 #[derive(Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -55,6 +55,8 @@ pub struct UserState {
 }
 
 /// An Echo user.
+///
+/// Their public key information can be found in [`UserPublicKeys`].
 #[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
 pub struct User {
     pub id: SnowflakeID,
@@ -68,9 +70,15 @@ pub struct User {
     pub secret: PasswordProtected<Secret>,
     #[sqlx(rename = "encrypted_state")]
     pub state: Encrypted<UserState>,
+    pub olm_account: Encrypted<AccountPickle>
+}
+
+/// A user's public key information.
+#[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
+pub struct UserPublicKeys {
     pub signature_verifier: SignatureVerifier,
-    pub olm_account: Encrypted<AccountPickle>,
-    pub olm_public_key: OlmPublicKey
+    pub olm_public_key: OlmPublicKey,
+    pub box_public_key: BoxPublicKey
 }
 
 /// A user's friend, containing the friend's user ID

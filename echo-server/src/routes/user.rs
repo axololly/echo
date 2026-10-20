@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, Encrypted, Friend, FriendRequest, OlmPreKeyMessage, OlmPublicKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserState};
+use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, OlmPreKeyMessage, OlmPublicKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserPublicKeys, UserState};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,28 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     Ok(user)
 }
 
+#[route("users.keys.public.get")]
+pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPublicKeys> {
+    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+        .stream
+        .receive()
+        .await?;
+
+    let stmt = "
+        SELECT
+            signature_verifier,
+            olm_public_key,
+            box_public_key
+        FROM users_public_keys
+        WHERE user_id = $1
+    ";
+
+    let user_public_keys: UserPublicKeys = fetch_opt_as!(&ctx.pool, stmt, user_id)
+        .context(E::User(U::NotFound))?;
+
+    Ok(user_public_keys)
+}
+
 /// Data related to creating a new user.
 ///
 /// The client is responsible for generating their
@@ -103,7 +125,8 @@ pub struct CreateNewUserData {
     pub state: Encrypted<UserState>,
     pub signature_verifier: SignatureVerifier,
     pub olm_account: Encrypted<AccountPickle>,
-    pub olm_public_key: Curve25519PublicKey
+    pub olm_public_key: Curve25519PublicKey,
+    pub box_public_key: BoxPublicKey
 }
 
 #[route("users.create")]
@@ -115,7 +138,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         state,
         signature_verifier,
         olm_account,
-        olm_public_key
+        olm_public_key,
+        box_public_key
     } = ctx
         .stream
         .receive()
@@ -148,9 +172,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         status: String::new(),
         secret,
         state,
-        signature_verifier,
-        olm_account,
-        olm_public_key: OlmPublicKey::from(olm_public_key)
+        olm_account
     };
 
     let mut tx = ctx
@@ -190,13 +212,22 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.olm_account
     );
 
+    let stmt = "
+        INSERT INTO users_public_keys (
+            user_id,
+            signature_verifier,
+            olm_public_key,
+            box_public_key
+        ) VALUES ($1, $2, $3, $4)
+    ";
+
     execute!(
         &mut *tx,
-        "INSERT INTO users_public_keys (user_id, signature_verifier, olm_public_key) VALUES ($1, $2, $3)",
-        &user.id,
-        &user.signature_verifier,
-        &user.olm_account,
-        &user.olm_public_key
+        stmt,
+        user.id,
+        signature_verifier,
+        OlmPublicKey::from(olm_public_key),
+        box_public_key
     );
 
     tx.commit().await.context(E::Database)?;
