@@ -121,6 +121,10 @@ CREATE TABLE dm_sessions (
 CREATE TABLE dm_messages (
     id INT8 PRIMARY KEY,
 
+    parent_id INT8 REFERENCES dm_messages(id)
+        ON UPDATE CASCADE
+        ON DELETE SET NULL,
+
     sender INT8 NOT NULL
         REFERENCES users(id)
         ON UPDATE CASCADE
