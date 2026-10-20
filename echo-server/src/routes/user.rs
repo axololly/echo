@@ -46,7 +46,7 @@ pub async fn login(ctx: &mut EchoContext) -> RouteResult<()> {
 
     let SignatureVerifier(verifying_key) = fetch_one_scalar!(
         &ctx.pool,
-        "SELECT signature_verifier FROM users WHERE id = $1",
+        "SELECT signature_verifier FROM users_public_keys WHERE user_id = $1",
         *signed_id
     );
 
@@ -69,19 +69,20 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
 
     let stmt = "
         SELECT
-            id,
-            name,
-            display_name,
-            avatar,
-            activity,
-            about_me,
-            status,
-            encrypted_secret,
-            encrypted_state,
-            signature_verifier,
-            olm_account,
-            olm_public_key
-        FROM users
+            u.id,
+            u.name,
+            u.display_name,
+            u.avatar,
+            u.activity,
+            u.about_me,
+            u.status,
+            u.encrypted_secret,
+            u.encrypted_state,
+            u.olm_account
+            pk.signature_verifier,
+            pk.olm_public_key
+        FROM users u
+        INNER JOIN users_public_keys pk ON pk.user_id = u.id
         WHERE id = $1
     ";
 
@@ -152,6 +153,12 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         olm_public_key: OlmPublicKey::from(olm_public_key)
     };
 
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
     let stmt = "
         INSERT INTO users (
             id,
@@ -163,15 +170,13 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
             status,
             encrypted_secret,
             encrypted_state,
-            signature_verifier,
-            olm_account,
-            olm_public_key
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            olm_account
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     ";
 
     // Add the user account to the database.
     execute!(
-        &ctx.pool,
+        &mut *tx,
         stmt,
         &user.id,
         &user.name,
@@ -182,10 +187,19 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.status,
         &user.secret,
         &user.state,
+        &user.olm_account
+    );
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO users_public_keys (user_id, signature_verifier, olm_public_key) VALUES ($1, $2, $3)",
+        &user.id,
         &user.signature_verifier,
         &user.olm_account,
         &user.olm_public_key
     );
+
+    tx.commit().await.context(E::Database)?;
 
     Ok(user)
 }
@@ -350,10 +364,10 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 
     let stmt = "
         SELECT
-            u.olm_public_key,
+            pk.olm_public_key,
             req.one_time_key
         FROM friend_requests req
-        INNER JOIN users u ON u.id = req.sender
+        INNER JOIN users_public_keys pk ON pk.user_id = req.sender
         WHERE req.sender = $1
         AND req.receiver = $2
     ";

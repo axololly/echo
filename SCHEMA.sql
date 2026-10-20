@@ -23,9 +23,18 @@ CREATE TABLE users (
     status TEXT NOT NULL CHECK (char_length(status) <= 200),
     encrypted_secret BYTEA NOT NULL,
     encrypted_state BYTEA NOT NULL,
+    olm_account BYTEA NOT NULL
+);
+
+CREATE TABLE users_public_keys (
+    user_id INT8 REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE SET NULL,
+
     signature_verifier BYTEA NOT NULL,
-    olm_account BYTEA NOT NULL,
-    olm_public_key BYTEA NOT NULL
+    olm_public_key BYTEA NOT NULL,
+
+    PRIMARY KEY (user_id)
 );
 
 -- A table to represent friendships between two users.
