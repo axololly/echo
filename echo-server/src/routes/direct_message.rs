@@ -39,6 +39,7 @@ pub async fn get_dm_session(ctx: &mut EchoContext) -> RouteResult<Encrypted<Sess
 #[derive(Deserialize, Serialize)]
 pub struct SendDmMessageData {
     pub receiver: SnowflakeID,
+    pub replied_to: Option<SnowflakeID>,
     pub message_body: Encrypted<MessageBody>,
     pub key_for_sender: Encrypted<Secret>,
     pub key_for_receiver: OlmMessage
@@ -51,6 +52,7 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
     // Disallow message data above 4KB to be received
     let SendDmMessageData {
         receiver,
+        replied_to,
         message_body,
         key_for_sender,
         key_for_receiver
@@ -77,8 +79,9 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
 
     execute!(
         &mut *tx,
-        "INSERT INTO dm_messages (id, sender, receiver, blob) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO dm_messages (id, parent_id, sender, receiver, blob) VALUES ($1, $2, $3, $4)",
         message_id,
+        replied_to,
         sender,
         receiver,
         &message_body
@@ -109,6 +112,7 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
 
     Ok(Message {
         id: message_id,
+        replied_to,
         author: sender,
         body: message_body
     })
