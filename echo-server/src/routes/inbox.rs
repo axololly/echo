@@ -33,10 +33,10 @@ pub async fn establish_pending_dm_sessions(ctx: &mut EchoContext) -> RouteResult
     let stmt = "
         SELECT
             pdms.other,
-            u.olm_public_key,
+            upk.olm_public_key,
             pdms.pre_key_msg
         FROM pending_dm_sessions pdms
-        INNER JOIN users u ON pdms.other = u.id
+        INNER JOIN users_public_keys upk ON pdms.other = upk.user_id
         WHERE pdms.waiting_on = $1
         AND pdms.other < $2
         ORDER BY pdms.other DESC
