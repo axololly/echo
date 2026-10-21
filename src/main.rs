@@ -3,12 +3,15 @@
 use std::{marker::PhantomData, ops::Deref};
 
 use argon2::Argon2;
-use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::Aead};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::Aead as _};
+use crypto_box::{ChaChaBox, aead::Aead as _};
 use hex_literal::hex;
 use hkdf::Hkdf;
 use p256::{PublicKey, SecretKey, ecdsa::{Signature as RawSignature, SigningKey, signature::{Signer, Verifier}}};
+use rootcause::{Result, prelude::ResultExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
+use thiserror::Error;
 
 /// A secret.
 ///
@@ -16,7 +19,7 @@ use sha2::Sha256;
 /// for encrypting data, signing data and deriving new keys
 /// through a HKDF.
 #[derive(Clone, Copy)]
-struct Secret([u8; 32]);
+pub struct Secret([u8; 32]);
 
 impl Secret {
     /// Generate a random [`Secret`].
@@ -63,18 +66,21 @@ impl Secret {
 /// Data is serialised before encryption and deserialised
 /// after encryption using [`serde`].
 #[derive(Clone, Deserialize, Serialize)]
-struct Encrypted<T> {
+pub struct Encrypted<T> {
     payload: Vec<u8>,
     nonce: [u8; 24],
     _data: PhantomData<T>
 }
 
 /// An error related to decryption.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq)]
 pub enum DecryptionError {
     /// Cannot decrypt the data
+    #[error("unable to decrypt data")]
     UnableToDecrypt,
+
     /// Decrypted data could not be deserialised
+    #[error("unable to deserialise data")]
     UnableToDeserialise
 }
 
@@ -103,10 +109,10 @@ impl<T: DeserializeOwned + Serialize> Encrypted<T> {
 
         let plaintext = cipher
             .decrypt(&self.nonce.into(), &*self.payload)
-            .map_err(|_| DecryptionError::UnableToDecrypt)?;
+            .context(DecryptionError::UnableToDecrypt)?;
 
         bitcode::deserialize(&plaintext)
-            .map_err(|_| DecryptionError::UnableToDeserialise)
+            .context(DecryptionError::UnableToDeserialise)
     }
 }
 
@@ -115,7 +121,7 @@ impl<T: DeserializeOwned + Serialize> Encrypted<T> {
 ///
 /// This also packages the original value.
 #[derive(Deserialize, Serialize)]
-struct Signed<T> {
+pub struct Signed<T> {
     inner: T,
     signature: RawSignature
 }
@@ -223,16 +229,103 @@ impl<T: DeserializeOwned + Serialize> PasswordProtected<T> {
     }
 }
 
-fn main() {
-    let num = 5;
+pub type BoxPublicKey = crypto_box::PublicKey;
 
-    let right_password = "hunter42";
-    let wrong_password = "hunter43";
+impl From<Secret> for BoxPublicKey {
+    fn from(value: Secret) -> Self {
+        let secret_key: crypto_box::SecretKey = value.0.into();
 
-    let pwd_num = PasswordProtected::new(&num, right_password);
+        secret_key.public_key()
+    }
+}
 
-    assert_eq!(pwd_num.unlock(right_password), Ok(num));
-    assert_eq!(pwd_num.unlock(wrong_password), Err(DecryptionError::UnableToDecrypt));
+/// A cryptographically secure parcel that can only
+/// be opened by the other party.
+///
+/// This is meant for transferring data in a one-shot
+/// manner through the server.
+pub struct CryptoBox<T> {
+    payload: Vec<u8>,
+    nonce: [u8; 24],
+    _data: PhantomData<T>
+}
+
+impl<T: Serialize + DeserializeOwned> CryptoBox<T> {
+    /// Create a new [`CryptoBox`] with the sender's
+    /// secret and the recipient's public key.
+    pub fn new(
+        value: &T,
+        sender_secret: Secret,
+        receiver_public_key: BoxPublicKey
+    ) -> Self {
+        let chacha_box = ChaChaBox::new(
+            &receiver_public_key,
+            &sender_secret.0.into()
+        );
+
+        let nonce: [u8; 24] = rand::random();
+
+        let bytes = bitcode::serialize(value)
+            .expect("failed to serialise");
+
+        let payload = chacha_box
+            .encrypt(&nonce.into(), bytes.as_ref())
+            .expect("failed to encrypt value in crypto box");
+
+        Self {
+            payload,
+            nonce,
+            _data: PhantomData
+        }
+    }
+
+    /// Decrypt this box using the sender's public key
+    /// and the recipient's secret.
+    pub fn decrypt(
+        &self,
+        sender_public_key: BoxPublicKey,
+        receiver_secret: Secret
+    ) -> Result<T, DecryptionError> {
+        let chacha_box = ChaChaBox::new(
+            &sender_public_key,
+            &receiver_secret.0.into()
+        );
+
+        let data = chacha_box
+            .decrypt(
+                &self.nonce.into(),
+                self.payload.as_ref()
+            )
+            .context(DecryptionError::UnableToDecrypt)?;
+
+        bitcode::deserialize(&data)
+            .context(DecryptionError::UnableToDeserialise)
+    }
+}
+
+fn main() -> Result<()> {
+    let alice_secret = Secret::random();
+    let bob_secret = Secret::random();
+
+    let alice_sends = "hello bob".to_string();
+
+    let crypto_box = CryptoBox::new(
+        &alice_sends,
+        alice_secret,
+        bob_secret.into()
+    );
+
+    let bob_reads = crypto_box.decrypt(
+        alice_secret.into(),
+        bob_secret
+    )?;
+
+    assert_eq!(
+        alice_sends, bob_reads,
+        "bob received exactly what alice sent"
+    );
 
     println!("assertions passed!");
+
+    Ok(())
 }
