@@ -5,6 +5,7 @@ pub mod routes;
 pub mod runner;
 pub mod stream;
 
+mod backoffice;
 mod macros;
 mod varint;
 

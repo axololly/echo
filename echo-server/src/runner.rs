@@ -7,7 +7,7 @@ use sqlx::postgres::PgPool;
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{events::EventDispatcher, router::{EchoContext, EchoRouter}, stream::Stream};
+use crate::{backoffice::{TaskContext, run_all_tasks}, events::EventDispatcher, router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -53,6 +53,12 @@ pub async fn run(
     let endpoint = Endpoint::server(config, local_addr)?;
 
     let event_dispatcher = EventDispatcher::default();
+
+    {
+        let pool = pool.clone();
+
+        run_all_tasks(TaskContext { pool });
+    }
 
     while let Some(inc) = endpoint.accept().await {
         if endpoint.open_connections() >= max_connections {
