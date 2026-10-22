@@ -215,10 +215,9 @@ pub async fn process_unread_group_messages(ctx: &mut EchoContext) -> RouteResult
             ON gsk.group_id = msg.group_id
             AND gsk.epoch = pgmk.epoch
             AND gsk.sender = msg.author
-            AND gsk.receiver = pgmk.recipient
         INNER JOIN users_public_keys upk
             ON upk.user_id = msg.author
-        WHERE pgmk.recipient = $1
+        WHERE gsk.receiver = $1
         AND msg.id < $2
         ORDER BY msg.id DESC
         LIMIT $3

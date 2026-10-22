@@ -1057,8 +1057,6 @@ pub async fn send_group_message(ctx: &mut EchoContext) -> RouteResult<Message> {
 
     let message_id = SNOWFLAKE_GEN.next();
 
-    let members = get_group_members(ctx, group_id).await?;
-
     let mut tx = ctx
         .pool
         .begin()
@@ -1104,28 +1102,18 @@ pub async fn send_group_message(ctx: &mut EchoContext) -> RouteResult<Message> {
     let stmt = "
         INSERT INTO pending_group_message_keys (
             message_id,
-            recipient,
             epoch,
             blob
-        ) VALUES ($1, $2, $3, $4)
+        ) VALUES ($1, $2, $3)
     ";
 
-    let key_for_others = SqlxMegolmMessage::from(key_for_others);
-
-    for member_id in members {
-        if member_id == author_id {
-            continue;
-        }
-
-        execute!(
-            &mut *tx,
-            stmt,
-            message_id,
-            member_id,
-            epoch,
-            &key_for_others
-        );
-    }
+    execute!(
+        &mut *tx,
+        stmt,
+        message_id,
+        epoch,
+        SqlxMegolmMessage::from(key_for_others)
+    );
 
     tx.commit().await.context(E::Database)?;
 
