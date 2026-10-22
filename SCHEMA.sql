@@ -114,6 +114,9 @@ CREATE TABLE messages (
     sent_at TIMESTAMPTZ NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
 
+    pinned BOOLEAN NOT NULL
+        DEFAULT FALSE,
+
     UNIQUE (id, conversation_id),
 
     FOREIGN KEY (parent_id, conversation_id)
@@ -121,6 +124,8 @@ CREATE TABLE messages (
         ON UPDATE CASCADE
         ON DELETE SET NULL
 );
+
+CREATE INDEX idx_messages_pinned ON messages(conversation_id, pinned, id);
 
 -- A table containing the message decryption keys
 -- a user has access to
