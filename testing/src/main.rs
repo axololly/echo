@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage}, runner::run, stream::Stream};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
 use echo_types::{BoxPublicKey, Compressed, CryptoBox, Encrypted, Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
@@ -348,11 +348,28 @@ async fn fetch_message_history(
     }).await
 }
 
+async fn update_message_pin(
+    user_conn: &quinn::Connection,
+    message_id: SnowflakeID,
+    new_pin_status: bool
+) -> Result<()> {
+    access_route(user_conn, "messages.pin.update", async |stream| {
+        stream.send(&UpdateMessagePinData {
+            message_id,
+            new_pin_status
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
         PgTempDB::builder()
-            .with_bin_path("/usr/lib/postgresql/17/bin")
+            .with_bin_path("/usr/lib/postgresql/18/bin")
     );
 
     let options = PgConnectOptions::from_str(&temp.connection_uri())?
@@ -401,62 +418,77 @@ async fn main() -> Result<()> {
         (&bob_conn, &bob)
     ).await?;
 
-    access_route(&alice_conn, "users.friends.remove", async |stream| {
-        stream.send(&bob.id).await?;
+    let mut msg = send_message(
+        &alice,
+        &alice_conn,
+        alice_bob_conv_id,
+        "hello bob"
+    ).await?;
 
-        stream.receive::<RouteResult<()>>().await??;
+    update_message_pin(
+        &alice_conn,
+        msg.id,
+        true
+    ).await?;
 
-        Ok(())
-    }).await?;
+    process_messages(&bob, &bob_conn).await?;
 
-    access_route(&bob_conn, "users.friends.get", async |stream| {
-        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+    let messages = fetch_message_history(
+        &bob,
+        &bob_conn,
+        alice_bob_conv_id,
+        MessageHistoryParams::Latest
+    ).await?;
 
-        assert!(
-            friends.is_empty(),
-            "bob still had friends after alice removed him"
-        );
+    assert!(
+        messages[0].0.pinned,
+        "alice's pin was not shown on bob's end"
+    );
 
-        Ok(())
-    }).await?;
+    update_message_pin(
+        &alice_conn,
+        msg.id,
+        false
+    ).await?;
 
-    access_route(&alice_conn, "users.friends.requests.create", async |stream| {
-        stream.send(&bob.id).await?;
+    let messages = fetch_message_history(
+        &bob,
+        &bob_conn,
+        alice_bob_conv_id,
+        MessageHistoryParams::Latest
+    ).await?;
 
-        stream.receive::<RouteResult<()>>().await??;
+    assert!(
+        !messages[0].0.pinned,
+        "alice's unpin was not shown on bob's end"
+    );
 
-        Ok(())
-    }).await?;
+    for i in 0..500 {
+        println!("[NOTICE] pinning message #{}", i + 1);
 
-    access_route(&bob_conn, "users.friends.requests.get", async |stream| {
-        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
+        let msg = send_message(
+            &alice,
+            &alice_conn,
+            alice_bob_conv_id,
+            "hello"
+        ).await?;
 
-        assert!(
-            requests.iter().any(|f| f.sender == alice.id),
-            "bob did not get a request from alice"
-        );
+        update_message_pin(&alice_conn, msg.id, true).await?;
+    }
 
-        Ok(())
-    }).await?;
+    let msg = send_message(
+        &alice,
+        &alice_conn,
+        alice_bob_conv_id,
+        "hello"
+    ).await?;
 
-    access_route(&bob_conn, "users.friends.requests.decline", async |stream| {
-        stream.send(&alice.id).await?;
+    let result = update_message_pin(&bob_conn, msg.id, true).await;
 
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    });
-
-    access_route(&bob_conn, "users.friends.requests.get", async |stream| {
-        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
-
-        assert!(
-            !requests.iter().any(|f| f.sender == alice.id),
-            "bob was not able to cancel alice's request"
-        );
-
-        Ok(())
-    }).await?;
+    assert!(
+        result.is_err(),
+        "alice and bob was able to pin more than 500 messages in their chat"
+    );
 
     println!("assertions passed!");
 

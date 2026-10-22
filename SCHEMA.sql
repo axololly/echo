@@ -114,6 +114,9 @@ CREATE TABLE messages (
     sent_at TIMESTAMPTZ NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
 
+    pinned BOOLEAN NOT NULL
+        DEFAULT FALSE,
+
     UNIQUE (id, conversation_id),
 
     FOREIGN KEY (parent_id, conversation_id)

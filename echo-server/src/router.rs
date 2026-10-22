@@ -84,6 +84,7 @@ impl EchoRouter {
         router.register_route(unban_group_member);
         router.register_route(get_banned_members_list);
         router.register_route(rotate_group_invite_code);
+        router.register_route(change_group_lock);
 
         // Message routes
         router.register_route(get_latest_conversation_session);
@@ -91,6 +92,8 @@ impl EchoRouter {
         router.register_route(get_message_history);
         router.register_route(send_message);
         router.register_route(process_unread_messages);
+        router.register_route(update_pin_status_on_message);
+        router.register_route(get_message);
 
         router
     }

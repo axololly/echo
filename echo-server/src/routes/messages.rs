@@ -5,11 +5,11 @@ use echo_server_derive::route;
 use echo_types::{__convert_encrypted_to_crypto_box, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
-use sqlx::QueryBuilder;
+use sqlx::{QueryBuilder, prelude::FromRow};
 use thiserror::Error;
 use vodozemac::megolm::{GroupSessionPickle, MegolmMessage, SessionKey};
 
-use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_scalar, fetch_opt_scalar, ok, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_scalar, ok, router::EchoContext};
 
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum MessagesRouteError {
@@ -17,7 +17,13 @@ pub enum MessagesRouteError {
     ConversationNotFound,
 
     #[error("session not found")]
-    SessionNotFound
+    SessionNotFound,
+
+    #[error("message not found")]
+    MessageNotFound,
+
+    #[error("too many pinned messages")]
+    TooManyPinnedMessages
 }
 
 use MessagesRouteError as M;
@@ -344,10 +350,12 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
 
     Ok(Message {
         id: message_id,
+        conversation_id,
         replied_to,
         author: author_id,
         body: message_body,
-        sent_at: Utc::now()
+        sent_at: Utc::now(),
+        pinned: false
     })
 }
 
@@ -370,6 +378,13 @@ pub struct GetMessageHistoryData {
     pub limit: u8
 }
 
+#[derive(FromRow)]
+struct MessageAndSecret {
+    #[sqlx(flatten)]
+    message: Message,
+    secret: Encrypted<Secret>
+}
+
 type Messages = Vec<(Message, Encrypted<Secret>)>;
 
 #[route("messages.history.get")]
@@ -386,18 +401,14 @@ pub async fn get_message_history(ctx: &mut EchoContext) -> RouteResult<Compresse
         bail!(E::Messages(M::ConversationNotFound));
     }
 
-    let base = "
+    let base = r#"
         SELECT
-            msg.id,
-            msg.parent_id,
-            msg.author,
-            msg.blob,
-            msg.sent_at,
-            mdk.blob
+            msg.*,
+            mdk.blob AS "secret"
         FROM messages msg
         INNER JOIN message_decryption_keys mdk
             ON mdk.message_id = msg.id
-    ";
+    "#;
 
     let mut builder = QueryBuilder::new(base);
 
@@ -450,19 +461,10 @@ pub async fn get_message_history(ctx: &mut EchoContext) -> RouteResult<Compresse
         .await
         .context(E::Database)?;
 
-    let mut messages = vec![];
-
-    for (id, replied_to, author, body, sent_at, secret) in rows {
-        let message = Message {
-            id,
-            replied_to,
-            author,
-            body,
-            sent_at
-        };
-
-        messages.push((message, secret));
-    }
+    let messages: Messages = rows
+        .into_iter()
+        .map(|MessageAndSecret { message, secret }| (message, secret))
+        .collect();
 
     Ok(messages.compress())
 }
@@ -477,6 +479,8 @@ pub struct UnprocessedMessage {
     pub session_key: CryptoBox<SessionKey>,
     pub message_key: MegolmMessage
 }
+
+// TODO: allow the user to customise the page size
 
 #[route("messages.unread.process")]
 pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
@@ -570,4 +574,95 @@ pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
     }
 
     Ok(())
+}
+
+/// Data necessary for pinning or unpinning a message.
+///
+/// If this request has no change on the pin status,
+/// a notification is not broadcasted.
+#[derive(Deserialize, Serialize)]
+pub struct UpdateMessagePinData {
+    pub message_id: SnowflakeID,
+    pub new_pin_status: bool
+}
+
+#[route("messages.pin.update")]
+pub async fn update_pin_status_on_message(ctx: &mut EchoContext) -> RouteResult<()> {
+    let UpdateMessagePinData {
+        message_id,
+        new_pin_status
+    } = ctx.stream.receive().await?;
+
+    let maybe_id = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT conversation_id FROM messages WHERE id = $1",
+        message_id
+    );
+
+    let Some(conversation_id) = maybe_id else {
+        bail!(E::Messages(M::MessageNotFound));
+    };
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    let pinned_messages: i64 = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT COUNT(id) FROM messages WHERE conversation_id = $1 AND pinned = TRUE",
+        conversation_id
+    );
+
+    if pinned_messages >= 500 {
+        bail!(E::Messages(M::TooManyPinnedMessages));
+    }
+
+    let stmt = "
+        UPDATE messages
+        SET pinned = $2
+        WHERE id = $1
+        RETURNING OLD.pinned";
+
+    let old_pin_status: bool = fetch_one_scalar!(
+        &ctx.pool,
+        stmt,
+        message_id,
+        new_pin_status
+    );
+
+    if new_pin_status != old_pin_status {
+        dispatch_event_for_conversation(ctx, conversation_id, Event::MessagePinStatusUpdated {
+            message_id,
+            pinned: true
+        }).await?;
+    }
+
+    Ok(())
+}
+
+#[route("messages.get")]
+pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
+    let message_id: SnowflakeID = ctx.stream.receive().await?;
+
+    let maybe_id = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT conversation_id FROM messages WHERE id = $1",
+        message_id
+    );
+
+    let Some(conversation_id) = maybe_id else {
+        bail!(E::Messages(M::MessageNotFound));
+    };
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    let message: Message = fetch_one_as!(
+        &ctx.pool,
+        "SELECT * FROM messages WHERE id = $1",
+        message_id
+    );
+
+    Ok(message)
 }

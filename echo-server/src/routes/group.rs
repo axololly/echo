@@ -784,48 +784,38 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Grou
     Ok(new_invite)
 }
 
-#[route("groups.lock")]
-pub async fn lock_group(ctx: &mut EchoContext) -> RouteResult<()> {
-    let group_id: SnowflakeID = ctx.stream.receive().await?;
+/// Data for updating the group's lock.
+#[derive(Deserialize, Serialize)]
+pub struct UpdateGroupLockData {
+    pub group_id: SnowflakeID,
+    pub new_lock_status: bool
+}
+
+#[route("groups.lock.update")]
+pub async fn change_group_lock(ctx: &mut EchoContext) -> RouteResult<()> {
+    let UpdateGroupLockData {
+        group_id,
+        new_lock_status
+    } = ctx.stream.receive().await?;
 
     if get_group_owner(ctx, group_id).await? != ctx.user.unwrap() {
         bail!(E::Group(G::OnlyForOwner));
     }
 
-    let result = execute!(
+    let old_lock_status: Option<bool> = fetch_opt_scalar!(
        &ctx.pool,
-        "UPDATE groups SET locked = TRUE WHERE id = $1",
+        "UPDATE groups SET locked = $2 WHERE id = $1 RETURNING OLD.locked",
         group_id
     );
 
-    if result.rows_affected() > 0 {
+    let Some(status) = old_lock_status else {
+        bail!(E::Group(G::GroupNotFound));
+    };
+
+    if new_lock_status != status {
         dispatch_event_for_conversation(ctx, group_id, Event::GroupLockStatusUpdated {
             group_id,
             locked: true
-        }).await?;
-    }
-
-    Ok(())
-}
-
-#[route("groups.unlock")]
-pub async fn unlock_group(ctx: &mut EchoContext) -> RouteResult<()> {
-    let group_id: SnowflakeID = ctx.stream.receive().await?;
-
-    if get_group_owner(ctx, group_id).await? != ctx.user.unwrap() {
-        bail!(E::Group(G::OnlyForOwner));
-    }
-
-    let result = execute!(
-        &ctx.pool,
-        "UPDATE groups SET locked = FALSE WHERE id = $1",
-        group_id
-    );
-
-    if result.rows_affected() > 0 {
-        dispatch_event_for_conversation(ctx, group_id, Event::GroupLockStatusUpdated {
-            group_id,
-            locked: false
         }).await?;
     }
 
