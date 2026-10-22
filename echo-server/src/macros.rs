@@ -5,12 +5,12 @@ use sqlx::{FromRow, postgres::PgRow};
 /// a given query, returning it as a [`PgRow`].
 #[macro_export]
 macro_rules! fetch_one {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_one($conn)
@@ -24,12 +24,12 @@ macro_rules! fetch_one {
 /// that type implements [`FromRow`].
 #[macro_export]
 macro_rules! fetch_one_as {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query_as($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query_as($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_one($conn)
@@ -42,12 +42,12 @@ macro_rules! fetch_one_as {
 /// value of the first column of that returned row.
 #[macro_export]
 macro_rules! fetch_one_scalar {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query_scalar($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query_scalar($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_one($conn)
@@ -60,12 +60,12 @@ macro_rules! fetch_one_scalar {
 /// Try to fetch one row from the database using a given query.
 #[macro_export]
 macro_rules! fetch_opt {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_optional($conn)
@@ -80,12 +80,12 @@ macro_rules! fetch_opt {
 /// implements [`FromRow`].
 #[macro_export]
 macro_rules! fetch_opt_as {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query_as($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query_as($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_optional($conn)
@@ -99,12 +99,12 @@ macro_rules! fetch_opt_as {
 /// value from the first column.
 #[macro_export]
 macro_rules! fetch_opt_scalar {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query_scalar($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query_scalar($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_optional($conn)
@@ -117,12 +117,12 @@ macro_rules! fetch_opt_scalar {
 /// a given query.
 #[macro_export]
 macro_rules! fetch_all {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_all($conn)
@@ -136,12 +136,12 @@ macro_rules! fetch_all {
 /// type that implements [`FromRow`].
 #[macro_export]
 macro_rules! fetch_all_as {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query_as($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query_as($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_all($conn)
@@ -154,12 +154,12 @@ macro_rules! fetch_all_as {
 /// extracting the value from the first column of each row.
 #[macro_export]
 macro_rules! fetch_all_scalar {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query_scalar($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query_scalar($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .fetch_all($conn)
@@ -175,12 +175,12 @@ macro_rules! fetch_all_scalar {
 /// example.
 #[macro_export]
 macro_rules! execute {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let mut query = sqlx::query($s);
-
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let query = sqlx::query($s)
         $(
-            query = query.bind($v);
-        )+
+            .bind($v)
+        )*
+        ;
 
         query
             .execute($conn)
@@ -197,8 +197,8 @@ macro_rules! execute {
 /// because it tries to fetch an `Option<i32>`.
 #[macro_export]
 macro_rules! exists {
-    ($conn:expr, $s:expr, $($v:expr),+) => {{
-        let maybe_row: Option<i32> = $crate::fetch_opt_scalar!($conn, $s, $($v),+);
+    ($conn:expr, $s:expr $(, $v:expr)*) => {{
+        let maybe_row: Option<i32> = $crate::fetch_opt_scalar!($conn, $s, $($v),*);
 
         maybe_row.is_some()
     }};
