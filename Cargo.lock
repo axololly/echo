@@ -723,6 +723,7 @@ dependencies = [
  "bitcode",
  "chrono",
  "echo-server-derive",
+ "echo-tasks",
  "echo-types",
  "quinn",
  "regex",
@@ -743,6 +744,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo-tasks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "echo-tasks-derive",
+ "tokio",
+]
+
+[[package]]
+name = "echo-tasks-derive"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "echo-types"
 version = "0.1.0"
 dependencies = [
@@ -752,7 +770,6 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "crypto_box",
- "ferroid",
  "hex",
  "hkdf",
  "p256",
@@ -876,16 +893,6 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-
-[[package]]
-name = "ferroid"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee93edf3c501f0035bbeffeccfed0b79e14c311f12195ec0e661e114a0f60da4"
-dependencies = [
- "portable-atomic",
- "web-time",
-]
 
 [[package]]
 name = "ff"
