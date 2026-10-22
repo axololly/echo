@@ -302,16 +302,8 @@ CREATE TABLE pending_group_message_keys (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    recipient INT8 NOT NULL,
     epoch INT8 NOT NULL,
     blob BYTEA NOT NULL,
 
-    PRIMARY KEY (recipient, epoch, message_id),
-
-    FOREIGN KEY (group_id, recipient)
-        REFERENCES group_members(group_id, user_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
+    PRIMARY KEY (message_id, epoch)
 );
-
-CREATE INDEX idx_pending_group_message_keys_message_id ON pending_group_message_keys(message_id, recipient);

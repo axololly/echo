@@ -1,0 +1,9 @@
+[package]
+name = "echo-tasks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.92"
+echo-tasks-derive = { path = "../echo-tasks-derive" }
+tokio = { version = "1.54.1", features = ["full"] }
