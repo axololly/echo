@@ -1,6 +1,8 @@
-use echo_types::{Encrypted, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxOlmMessage};
+use chrono::Utc;
+use echo_types::{Compressable, Compressed, Encrypted, Message, MessageBody, MessageHistoryParams, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxOlmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
+use sqlx::QueryBuilder;
 use thiserror::Error;
 use vodozemac::olm::{OlmMessage, SessionPickle};
 
@@ -114,6 +116,110 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
         id: message_id,
         replied_to,
         author: sender,
-        body: message_body
+        body: message_body,
+        sent_at: Utc::now()
     })
+}
+
+/// Data related to getting a list of messages from a group.
+///
+/// The limit is capped at 100.
+#[derive(Deserialize, Serialize)]
+pub struct GetDmMessageHistoryData {
+    pub other: SnowflakeID,
+    pub params: MessageHistoryParams,
+    pub limit: u8
+}
+
+type Messages = Vec<(Message, Encrypted<Secret>)>;
+
+#[route("dms.messages.history.get")]
+pub async fn get_dm_message_history(ctx: &mut EchoContext) -> RouteResult<Compressed<Messages>> {
+    let user_id = ctx.user.unwrap();
+
+    let GetDmMessageHistoryData {
+        other,
+        params,
+        limit
+    } = ctx.stream.receive().await?;
+
+    let base = "
+        SELECT
+            msg.id,
+            msg.parent_id,
+            msg.sender,
+            msg.blob,
+            msg.sent_at,
+            mdk.blob
+        FROM dm_messages msg
+        INNER JOIN message_decryption_keys mdk
+            ON mdk.message_id = msg.id
+    ";
+
+    let mut builder = QueryBuilder::new(base);
+
+    builder
+        .push("AND mdk.user_id = ")
+        .push_bind(user_id)
+        .push(format!("
+            WHERE (msg.sender = {user_id} AND msg.receiver = {other}
+            OR msg.sender = {other} AND msg.receiver = {user_id})
+        "));
+
+    use MessageHistoryParams as P;
+
+    match params {
+        P::Before(dt) => {
+            builder
+                .push(" AND msg.sent_at < ")
+                .push_bind(dt);
+        },
+        P::After(dt) => {
+            builder
+                .push("AND msg.sent_at > ")
+                .push_bind(dt);
+        },
+        P::Between(start, end) => {
+            if start > end {
+                bail!(E::InvalidData);
+            }
+
+            builder
+                .push(" AND msg.sent_at > ")
+                .push_bind(start)
+                .push(" AND msg.sent_at < ")
+                .push_bind(end);
+        },
+        P::Latest => {
+            builder
+                .push(" AND msg.sent_at < ")
+                .push_bind(SnowflakeID::MAX.as_utc_date_time());
+        }
+    }
+
+    builder
+        .push(" LIMIT ")
+        .push_bind(limit.min(100) as i64);
+
+    let rows = builder
+        .build_query_as()
+        .fetch_all(&ctx.pool)
+        .await
+        .context(E::Database)?;
+
+    let mut messages = vec![];
+
+    for (id, replied_to, author, body, sent_at, secret) in rows {
+        let message = Message {
+            id,
+            replied_to,
+            author,
+            body,
+            sent_at
+        };
+
+        messages.push((message, secret));
+    }
+
+    Ok(messages.compress())
 }

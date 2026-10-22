@@ -137,6 +137,17 @@ pub struct Encrypted<T> {
     _data: PhantomData<T>,
 }
 
+impl<T> Encrypted<T> {
+    /// Change the marker type of this [`Encrypted`] wrapper.
+    pub fn cast<U>(self) -> Encrypted<U> {
+        Encrypted {
+            payload: self.payload,
+            nonce: self.nonce,
+            _data: PhantomData
+        }
+    }
+}
+
 impl<T> Clone for Encrypted<T> {
     fn clone(&self) -> Self {
         Self {
