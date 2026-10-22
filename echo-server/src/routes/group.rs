@@ -1,10 +1,11 @@
 use std::{collections::{HashMap, HashSet}, sync::LazyLock};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{__convert_encrypted_to_crypto_box, AssetID, BannedMember, BoxPublicKey, CryptoBox, Encrypted, Group, GroupInvite, GroupMember, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use echo_types::{__convert_encrypted_to_crypto_box, AssetID, BannedMember, BoxPublicKey, CryptoBox, Encrypted, Group, GroupInvite, GroupMember, Message, MessageBody, MessageHistoryParams, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
+use sqlx::QueryBuilder;
 use thiserror::Error;
 use vodozemac::{megolm::{GroupSessionPickle, MegolmMessage, SessionKey}};
 
@@ -1131,6 +1132,114 @@ pub async fn send_group_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         id: message_id,
         replied_to,
         author: author_id,
-        body: message_body
+        body: message_body,
+        sent_at: Utc::now()
     })
+}
+
+/// Data related to getting a list of messages from a group.
+///
+/// The limit is capped at 100.
+#[derive(Deserialize, Serialize)]
+pub struct GetGroupMessageHistoryData {
+    pub group_id: SnowflakeID,
+    pub params: MessageHistoryParams,
+    pub limit: u8
+}
+
+#[route("groups.messages.history.get")]
+pub async fn get_group_message_history(ctx: &mut EchoContext) -> RouteResult<Vec<(Message, Encrypted<Secret>)>> {
+    let user_id = ctx.user.unwrap();
+
+    let GetGroupMessageHistoryData {
+        group_id,
+        params,
+        limit
+    } = ctx.stream.receive().await?;
+
+    if !is_group_member(ctx, group_id).await? {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let base = "
+        SELECT
+            msg.id,
+            msg.parent_id,
+            msg.author,
+            msg.blob,
+            msg.sent_at,
+            mdk.blob
+        FROM group_messages msg
+        INNER JOIN message_decryption_keys mdk
+            ON mdk.message_id = msg.id
+    ";
+
+    let mut builder = QueryBuilder::new(base);
+
+    builder
+        .push("AND mdk.user_id = ")
+        .push_bind(user_id);
+
+    builder
+        .push(" WHERE msg.group_id = ")
+        .push_bind(group_id);
+
+    use MessageHistoryParams as P;
+
+    match params {
+        P::Before(dt) => {
+            builder
+                .push(" AND msg.sent_at <")
+                .push_bind(dt);
+        },
+        P::After(dt) => {
+            builder
+                .push(" AND msg.sent_at >")
+                .push_bind(dt);
+        },
+        P::Between(start, end) => {
+            if start > end {
+                bail!(E::InvalidData);
+            }
+
+            builder
+                .push(" AND msg.sent_at > ")
+                .push_bind(start)
+                .push(" AND msg.sent_at < ")
+                .push_bind(end);
+        },
+        P::Latest => {
+            builder
+                .push(" AND msg.sent_at < ")
+                .push_bind(SnowflakeID::MAX.as_utc_date_time());
+        }
+    }
+
+    builder
+        .push(" ORDER BY msg.sent_at DESC LIMIT ")
+        .push_bind(limit.min(100) as i32);
+
+    let rows = builder
+        .build_query_as()
+        .fetch_all(&ctx.pool)
+        .await
+        .context(E::Database)?;
+
+    println!("received query results");
+
+    let mut messages = vec![];
+
+    for (id, replied_to, author, body, sent_at, secret) in rows {
+        let message = Message {
+            id,
+            replied_to,
+            author,
+            body,
+            sent_at
+        };
+
+        messages.push((message, secret));
+    }
+
+    Ok(messages)
 }

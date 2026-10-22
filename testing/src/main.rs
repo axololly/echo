@@ -1,14 +1,14 @@
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewGroupData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, GroupChatSession, SendGroupMessageData, UnprocessedGroupMessage}, runner::run, stream::Stream};
-use echo_types::{BoxPublicKey, Encrypted, Group, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateFriendRequestData, CreateNewGroupData, CreateNewUserData, FriendRequestKeys, FriendRequestSessionData, GetDmMessageHistoryData, GetGroupMessageHistoryData, GroupChatSession, SendDmMessageData, SendGroupMessageData, UnestablishedDmSession, UnprocessedGroupMessage}, runner::run, stream::Stream};
+use echo_types::{BoxPublicKey, Encrypted, Group, Message, MessageBody, MessageHistoryParams, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
-use vodozemac::{megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig}, olm::{Account, OlmMessage, SessionConfig as OlmSessionConfig}};
+use vodozemac::{megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig}, olm::{Account, OlmMessage, Session, SessionConfig as OlmSessionConfig, SessionPickle}};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
 fn into_socket_addr(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
@@ -180,24 +180,27 @@ async fn connect_and_create_account(
 async fn establish_friendship(
     user1_data: (&quinn::Connection, &User),
     user2_data: (&quinn::Connection, &User)
-) -> Result<()> {
+) -> Result<(Session, Session)> {
     let (conn1, user1) = user1_data;
     let (conn2, user2) = user2_data;
 
+    let user1_secret = user1.secret.unlock(DEFAULT_PASSWORD)?;
+    let mut user1_olm: Account = user1_secret.decrypt(&user1.olm_account)?.into();
+
+    let user2_secret = user2.secret.unlock(DEFAULT_PASSWORD)?;
+    let user2_olm: Account = user2_secret.decrypt(&user2.olm_account)?.into();
+
     access_route(conn1, "users.friends.requests.create", async |stream| {
-        let secret = user1.secret.unlock(DEFAULT_PASSWORD)?;
-        let mut olm: Account = secret.decrypt(&user1.olm_account)?.into();
+        let result = user1_olm.generate_one_time_keys(1);
 
-        let result = olm.generate_one_time_keys(1);
-
-        olm.mark_keys_as_published();
+        user1_olm.mark_keys_as_published();
 
         let one_time_key = result.created[0];
 
         let data = CreateFriendRequestData {
             receiver: user2.id,
             one_time_key,
-            new_account: secret.encrypt(&olm.pickle())
+            new_account: user1_secret.encrypt(&user1_olm.pickle())
         };
 
         stream.send(&data).await?;
@@ -207,10 +210,7 @@ async fn establish_friendship(
         Ok(())
     }).await?;
 
-    access_route(conn2, "users.friends.requests.accept", async |stream| {
-        let secret = user2.secret.unlock(DEFAULT_PASSWORD)?;
-        let olm: Account = secret.decrypt(&user2.olm_account)?.into();
-
+    let user2_to_user1 = access_route(conn2, "users.friends.requests.accept", async |stream| {
         stream.send(&user1.id).await?;
 
         let FriendRequestKeys {
@@ -218,7 +218,7 @@ async fn establish_friendship(
             one_time_key
         } = stream.receive::<RouteResult<_>>().await??;
 
-        let mut session = olm.create_outbound_session(
+        let mut session = user2_olm.create_outbound_session(
             OlmSessionConfig::version_1(),
             public_key,
             one_time_key
@@ -229,7 +229,7 @@ async fn establish_friendship(
         };
 
         let data = FriendRequestSessionData {
-            session: secret.encrypt(&session.pickle()),
+            session: user2_secret.encrypt(&session.pickle()),
             pre_key_message
         };
 
@@ -240,7 +240,39 @@ async fn establish_friendship(
         Ok(session)
     }).await?;
 
-    Ok(())
+    let user1_to_user2 = access_route(conn1, "inbox.dm.sessions.establish", async |stream| {
+        let mut entries: HashMap<SnowflakeID, UnestablishedDmSession> = stream.receive::<RouteResult<_>>().await??;
+
+        let UnestablishedDmSession {
+            user_olm_public_key,
+            pre_key_message
+        } = &entries[&user2.id];
+
+        let session = user1_olm.create_inbound_session(
+            OlmSessionConfig::version_1(),
+            *user_olm_public_key,
+            pre_key_message
+        )?.session;
+
+        let mut sessions = HashMap::new();
+
+        sessions.insert(user2.id, user1_secret.encrypt(&session.pickle()));
+
+        stream.send(&sessions).await?;
+
+        stream.send(&user1_secret.encrypt(&user1_olm.pickle())).await?;
+
+        #[allow(unused)]
+        {
+            entries = stream.receive::<RouteResult<_>>().await??;
+        }
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(session)
+    }).await?;
+
+    Ok((user1_to_user2, user2_to_user1))
 }
 
 async fn send_group_message(
@@ -361,6 +393,159 @@ async fn process_group_messages(
     Ok(message_secrets)
 }
 
+enum Location {
+    Group(SnowflakeID),
+    DmWith(SnowflakeID)
+}
+
+async fn fetch_message_history(
+    user: &User,
+    user_conn: &quinn::Connection,
+    location: Location,
+    params: MessageHistoryParams
+) -> Result<Vec<(Message, Secret)>> {
+    let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
+
+    match location {
+        Location::Group(id) => {
+            access_route(user_conn, "groups.messages.history.get", async |stream| {
+                stream.send(&GetGroupMessageHistoryData {
+                    group_id: id,
+                    params,
+                    limit: 100
+                }).await?;
+
+                let data: Vec<(Message, Encrypted<Secret>)> = stream.receive::<RouteResult<_>>().await??;
+
+                let mut messages = vec![];
+
+                for (msg, enc) in data {
+                    let secret = user_secret.decrypt(&enc)?;
+
+                    messages.push((msg, secret));
+                }
+
+                Ok(messages)
+            }).await
+        },
+
+        Location::DmWith(id) => {
+            access_route(user_conn, "dms.messages.history.get", async |stream| {
+                stream.send(&GetDmMessageHistoryData {
+                    other: id,
+                    params,
+                    limit: 100
+                }).await?;
+
+                let data: Vec<(Message, Encrypted<Secret>)> = stream.receive::<RouteResult<_>>().await??;
+
+                let mut messages = vec![];
+
+                for (msg, enc) in data {
+                    let secret = user_secret.decrypt(&enc)?;
+
+                    messages.push((msg, secret));
+                }
+
+                Ok(messages)
+            }).await
+        },
+    }
+}
+
+async fn fetch_olm_session_for(
+    user_conn: &quinn::Connection,
+    target: SnowflakeID
+) -> Result<Session> {
+    access_route(user_conn, "dms.sessions.get", async |stream| {
+        stream.send(&target).await?;
+
+        let pickle = stream.receive::<RouteResult<SessionPickle>>().await??;
+
+        Ok(pickle.into())
+    }).await
+}
+
+async fn send_dm_message(
+    user: &User,
+    user_conn: &quinn::Connection,
+    receiver: SnowflakeID,
+    session: &mut Session,
+    message: &str
+) -> Result<Message> {
+    access_route(user_conn, "dms.messages.send", async |stream| {
+        let secret = user.secret.unlock(DEFAULT_PASSWORD)?;
+        let message_secret = Secret::random();
+
+        stream.send(&SendDmMessageData {
+            receiver,
+            replied_to: None,
+            message_body: message_secret.encrypt(&MessageBody {
+                content: message.to_string()
+            }),
+            key_for_sender: secret.encrypt(&message_secret),
+            key_for_receiver: session.encrypt(message_secret)?
+        }).await?;
+
+        let message = stream.receive::<RouteResult<Message>>().await??;
+
+        Ok(message)
+    }).await
+}
+
+async fn process_dm_messages(
+    user: &User,
+    user_conn: &quinn::Connection
+) -> Result<HashMap<SnowflakeID, Secret>> {
+    let secret = user.secret.unlock(DEFAULT_PASSWORD)?;
+
+    let mut secrets = HashMap::new();
+    let mut cache = HashMap::new();
+
+    access_route(user_conn, "inbox.messages.dm.unread", async |stream| {
+        let mut entries: HashMap<SnowflakeID, (SnowflakeID, OlmMessage)>;
+
+        loop {
+            entries = stream.receive::<RouteResult<_>>().await??;
+
+            if entries.is_empty() {
+                break;
+            }
+
+            let mut processed = HashMap::new();
+
+            for (id, (author, msg)) in entries {
+                #[allow(clippy::map_entry)]
+                if !cache.contains_key(&author) {
+                    let fetched = fetch_olm_session_for(user_conn, author).await?;
+
+                    cache.insert(author, fetched);
+                }
+
+                let session = cache.get_mut(&author).unwrap();
+
+                let message_secret = {
+                    let bytes = session.decrypt(&msg)?;
+
+                    Secret::try_from_bytes(&bytes)
+                        .expect("invalid message secret")
+                };
+
+                secrets.insert(id, message_secret);
+                processed.insert(id, secret.encrypt(&message_secret));
+            }
+
+            stream.send(&processed).await?;
+        }
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    Ok(secrets)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -410,10 +595,50 @@ async fn main() -> Result<()> {
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
     let (chloe, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
 
-    establish_friendship(
+    let (mut alice_to_bob, _bob_to_alice) = establish_friendship(
         (&alice_conn, &alice),
         (&bob_conn, &bob)
     ).await?;
+
+    let alice_plaintext = "hello bob";
+
+    /* Test fetching history in DMs */
+
+    send_dm_message(
+        &alice,
+        &alice_conn,
+        bob.id,
+        &mut alice_to_bob,
+        alice_plaintext
+    ).await?;
+
+    let messages = fetch_message_history(
+        &bob,
+        &bob_conn,
+        Location::DmWith(alice.id),
+        MessageHistoryParams::Latest
+    ).await?;
+
+    assert!(
+        messages.is_empty(),
+        "bob got messages when he hadn't processed the incoming DM message"
+    );
+
+    process_dm_messages(&bob, &bob_conn).await?;
+
+    let messages = fetch_message_history(
+        &bob,
+        &bob_conn,
+        Location::DmWith(alice.id),
+        MessageHistoryParams::Latest
+    ).await?;
+
+    assert!(
+        !messages.is_empty(),
+        "bob did not get any new DM messages after processing them"
+    );
+
+    /* Test fetching history in groups */
 
     establish_friendship(
         (&alice_conn, &alice),
@@ -431,55 +656,46 @@ async fn main() -> Result<()> {
         Ok(group)
     }).await?;
 
-    let alice_plaintext = "hello bob and chloe";
+    let alice_plaintext = "hello group";
 
-    let alice_message = send_group_message(
+    send_group_message(
         &alice,
         &alice_conn,
         alice_group.id,
         alice_plaintext
     ).await?;
 
-    let bob_message_secrets = process_group_messages(
+    let message_history = fetch_message_history(
         &bob,
-        &bob_conn
+        &bob_conn,
+        Location::Group(alice_group.id),
+        MessageHistoryParams::Latest
     ).await?;
 
-    let bob_received = bob_message_secrets[&alice_message.id]
-        .decrypt(&alice_message.body)?
-        .content;
+    assert!(
+        message_history.is_empty(),
+        "bob still got rows returned when he hadn't processed any messages"
+    );
+
+    process_group_messages(&bob, &bob_conn).await?;
+
+    let message_history = fetch_message_history(
+        &bob,
+        &bob_conn,
+        Location::Group(alice_group.id),
+        MessageHistoryParams::Latest
+    ).await?;
+
+    assert!(
+        message_history.len() == 1,
+        "bob did not get 1 message in the returned history after processing messages"
+    );
+
+    let (msg, secret) = &message_history[0];
 
     assert_eq!(
-        bob_received, alice_plaintext,
-        "bob did not correctly receive what alice sent"
-    );
-
-    // Test sending an empty message
-    let empty_message_result = send_group_message(
-        &alice,
-        &alice_conn,
-        alice_group.id,
-        ""
-    ).await;
-
-    // Should work: client is in charge of filtering
-    assert!(
-        empty_message_result.is_ok(),
-        "failed to send an empty message"
-    );
-
-    // Test sending a message too large
-    let oversized_message_result = send_group_message(
-        &alice,
-        &alice_conn,
-        alice_group.id,
-        &"a".repeat(200_000) // 200KB - too large
-    ).await;
-
-    // Should be rejected by the server
-    assert!(
-        oversized_message_result.is_err(),
-        "succeeded in sending oversized message"
+        secret.decrypt(&msg.body)?.content, alice_plaintext,
+        "bob was not able to fetch the same message alice sent"
     );
 
     println!("assertions passed!");

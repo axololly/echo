@@ -1,6 +1,6 @@
 use std::{fmt::{Debug, Display}, sync::{LazyLock, atomic::{AtomicI64, Ordering}}};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A snowflake ID used for uniquely identifying data
@@ -35,6 +35,14 @@ impl SnowflakeID {
             | sequence_num;
 
         Self { id }
+    }
+
+    /// Extract the timestamp of this snowflake ID as a [`DateTime`] object.
+    pub const fn as_utc_date_time(&self) -> DateTime<Utc> {
+        let timestamp = self.id >> (MACHINE_ID_BITS + SEQUENCE_NUM_BITS);
+
+        DateTime::from_timestamp_millis(timestamp + ECHO_EPOCH)
+            .expect("cannot convert to UTC datetime (this should never fail)")
     }
 }
 

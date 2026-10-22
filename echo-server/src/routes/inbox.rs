@@ -125,7 +125,8 @@ pub async fn process_unread_dm_messages(ctx: &mut EchoContext) -> RouteResult<()
             msg.sender,
             pmk.blob
         FROM pending_dm_message_keys pmk
-        INNER JOIN dm_messages msg ON msg.id = pmk.message_id
+        INNER JOIN dm_messages msg
+            ON msg.id = pmk.message_id
         WHERE pmk.waiting_on = $1
         AND msg.id < $2
         ORDER BY msg.id DESC
