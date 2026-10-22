@@ -55,6 +55,19 @@ pub enum Event {
     GroupInviteRotated {
         group_id: SnowflakeID,
         new_invite: GroupInvite
+    },
+
+    /// New message sent in group
+    NewGroupMessage {
+        group_id: SnowflakeID,
+        author_id: SnowflakeID,
+        message_id: SnowflakeID
+    },
+
+    /// Message was pinned or unpinned
+    MessagePinStatusUpdated {
+        message_id: SnowflakeID,
+        pinned: bool
     }
 }
 
