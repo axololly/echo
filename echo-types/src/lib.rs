@@ -1,6 +1,9 @@
 mod asset;
 pub use asset::*;
 
+mod compressed;
+pub use compressed::*;
+
 mod group;
 pub use group::*;
 
