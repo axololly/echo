@@ -4,15 +4,18 @@ use async_trait::async_trait;
 use tokio::{sync::mpsc::{Sender, channel}, task::JoinHandle, time::interval};
 
 #[async_trait]
-pub trait Task: Send + Sync {
+pub trait Task<C>: Send + Sync {
     /// How long to wait between running the task.
     fn interval(&self) -> Duration;
 
     /// The main callback for the task.
-    async fn callback(&self);
+    async fn callback(&self, ctx: C);
 }
 
-fn run_task(task: Arc<dyn Task>) -> RunningTaskInfo {
+fn run_task<C>(
+    task: Arc<dyn Task<C>>,
+    make_context_fn: impl Fn() ->
+) -> RunningTaskInfo {
     let (sender, mut receiver) = channel::<()>(1);
 
     let mut interval = interval(task.interval());
