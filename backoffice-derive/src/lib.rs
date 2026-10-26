@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Expr, ExprLit, Ident, ItemFn, Lit, MetaNameValue, Token, parse_macro_input, parse2, punctuated::Punctuated};
+use syn::{Expr, ExprLit, FnArg, Ident, ItemFn, Lit, MetaNameValue, PatType, Token, parse_macro_input, parse2, punctuated::Punctuated};
 
 #[proc_macro_attribute]
 pub fn interval(
@@ -48,12 +48,28 @@ pub fn interval(
 
     let mut callback = parse_macro_input!(item as ItemFn);
 
-    let fn_name = &callback.sig.ident;
+    let mut fn_name = &callback.sig.ident;
     let ret_type = &callback.sig.output;
+
+    let mut ctx_type = None;
+
+    assert!(
+        callback.sig.inputs.len() < 2,
+        "cannot have more than 1 parameter in the task body"
+    );
+
+    if let Some(arg) = callback.sig.inputs.first() {
+        let FnArg::Typed(PatType { ty, .. }) = arg else {
+            panic!("task parameter must have a type");
+        };
+
+        ctx_type = Some(ty.clone());
+    }
 
     let body = &callback.block;
 
     let mut on_error = None;
+    let mut task_name = None;
 
     callback.attrs.retain(|attr| {
         let is_attr_name = |name| attr.meta.path().is_ident(name);
@@ -65,6 +81,18 @@ pub fn interval(
 
             parse2(list.tokens.clone()).ok()
         };
+
+        if is_attr_name("rename") {
+            let Some(new_name) = grab_single_ident() else {
+                return true;
+            };
+
+            if task_name.is_some() {
+                panic!("function {fn_name:?} has multiple renames (only allowed one)");
+            }
+
+            task_name = Some(new_name);
+        }
 
         if is_attr_name("on_error") {
             let Some(error_handler) = grab_single_ident() else {
@@ -88,6 +116,10 @@ pub fn interval(
 
     let on_error = on_error.unwrap_or(quote! {});
 
+    if let Some(name) = &task_name {
+        fn_name = name;
+    }
+
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
 
@@ -96,14 +128,32 @@ pub fn interval(
         fn_name.span()
     );
 
-    let wrapper_name = Ident::new(
-        &format!("__{fn_name}_wrapper_impl"),
-        fn_name.span()
-    );
+    let ctx_param = match ctx_type {
+        Some(ref ty) => quote! { ctx: #ty },
+        None => quote! {}
+    };
+
+    let wrapped = match ctx_type {
+        Some(_) => quote! {
+            let ctx = self.ctx.clone();
+
+            inner(ctx).await
+        },
+        None => quote! {
+            inner().await
+        }
+    };
+
+    let ctx_arg = match ctx_type {
+        Some(_) => quote! { ctx },
+        None => quote! {}
+    };
 
     quote! {
         #[allow(non_camel_case_types)]
-        struct #task_name;
+        struct #task_name {
+            #ctx_param
+        }
 
         #[::async_trait::async_trait]
         impl ::backoffice::task::Task for #task_name {
@@ -112,34 +162,31 @@ pub fn interval(
             }
 
             async fn callback(&self) {
-                let inner = async || #ret_type {
+                let inner = async |#ctx_param| #ret_type {
                     #body
                 };
 
-                let _result = inner().await;
+                let _result = {
+                    #wrapped
+                };
 
                 #on_error
             }
         }
 
         #[allow(non_camel_case_types)]
-        struct #wrapper_name {
-            internal: ::std::sync::LazyLock<::backoffice::task::RunningTask>
+        struct #fn_name {
+            internal: ::backoffice::task::RunningTask
         }
 
-        impl #wrapper_name {
-            /// Create a new task. Running has to be done explicitly.
-            pub const fn new() -> Self {
-                Self {
-                    internal: ::std::sync::LazyLock::new(|| {
-                        ::backoffice::task::RunningTask::new(#task_name)
-                    })
-                }
-            }
-
+        impl #fn_name {
             /// Start running the task.
-            pub fn start(&self) {
-                self.internal.start();
+            pub fn start(#ctx_param) -> Self {
+                let internal = ::backoffice::task::RunningTask::new(#task_name { #ctx_arg });
+
+                internal.start();
+
+                Self { internal }
             }
 
             /// Stop running the task.
@@ -155,8 +202,5 @@ pub fn interval(
                 self.internal.cancel();
             }
         }
-
-        #[allow(non_upper_case_globals)]
-        pub static #fn_name: #wrapper_name = #wrapper_name::new();
     }.into()
 }
