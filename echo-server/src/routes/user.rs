@@ -1,13 +1,12 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, OlmPreKeyMessage, OlmPublicKey, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserPublicKeys, UserState};
+use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserPublicKeys, UserState};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use vodozemac::{Curve25519PublicKey, olm::{AccountPickle, PreKeyMessage, SessionPickle}};
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, ok, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, route, router::EchoContext};
 
 /// An error related to users.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -25,10 +24,7 @@ pub enum UserRouteError {
     NotFound,
 
     #[error("already friends with user")]
-    AlreadyFriends,
-
-    #[error("cannot send a friend request to that person")]
-    FriendRequestDenied
+    AlreadyFriends
 }
 
 // Regex to match a valid username
@@ -67,27 +63,11 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
         .receive()
         .await?;
 
-    let stmt = "
-        SELECT
-            u.id,
-            u.name,
-            u.display_name,
-            u.avatar,
-            u.activity,
-            u.about_me,
-            u.status,
-            u.encrypted_secret,
-            u.encrypted_state,
-            u.olm_account
-            pk.signature_verifier,
-            pk.olm_public_key
-        FROM users u
-        INNER JOIN users_public_keys pk ON pk.user_id = u.id
-        WHERE id = $1
-    ";
-
-    let user: User = fetch_opt_as!(&ctx.pool, stmt, user_id)
-        .context(E::User(U::NotFound))?;
+    let user: User = fetch_opt_as!(
+        &ctx.pool,
+        "SELECT * FROM users WHERE id = $1",
+        user_id
+    ).context(E::User(U::NotFound))?;
 
     Ok(user)
 }
@@ -102,7 +82,6 @@ pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPubl
     let stmt = "
         SELECT
             signature_verifier,
-            olm_public_key,
             box_public_key
         FROM users_public_keys
         WHERE user_id = $1
@@ -124,8 +103,6 @@ pub struct CreateNewUserData {
     pub secret: PasswordProtected<Secret>,
     pub state: Encrypted<UserState>,
     pub signature_verifier: SignatureVerifier,
-    pub olm_account: Encrypted<AccountPickle>,
-    pub olm_public_key: Curve25519PublicKey,
     pub box_public_key: BoxPublicKey
 }
 
@@ -137,8 +114,6 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         secret,
         state,
         signature_verifier,
-        olm_account,
-        olm_public_key,
         box_public_key
     } = ctx
         .stream
@@ -171,8 +146,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         about_me: String::new(),
         status: String::new(),
         secret,
-        state,
-        olm_account
+        state
     };
 
     let mut tx = ctx
@@ -191,9 +165,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
             about_me,
             status,
             encrypted_secret,
-            encrypted_state,
-            olm_account
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            encrypted_state
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     ";
 
     // Add the user account to the database.
@@ -208,17 +181,15 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.about_me,
         &user.status,
         &user.secret,
-        &user.state,
-        &user.olm_account
+        &user.state
     );
 
     let stmt = "
         INSERT INTO users_public_keys (
             user_id,
             signature_verifier,
-            olm_public_key,
             box_public_key
-        ) VALUES ($1, $2, $3, $4)
+        ) VALUES ($1, $2, $3)
     ";
 
     execute!(
@@ -226,7 +197,6 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         stmt,
         user.id,
         signature_verifier,
-        OlmPublicKey::from(olm_public_key),
         box_public_key
     );
 
@@ -238,9 +208,9 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 #[route("users.friends.get")]
 pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Vec<Friend>> {
     let stmt = r#"
-        SELECT user1 AS "id", friends_since FROM friendships WHERE user2 = $1
+        SELECT user1 AS "user_id", friends_since, conversation_id FROM friendships WHERE user2 = $1
         UNION ALL
-        SELECT user2 AS "id", friends_since FROM friendships WHERE user1 = $1
+        SELECT user2 AS "user_id", friends_since, conversation_id FROM friendships WHERE user1 = $1
     "#;
 
     let user_id = ctx.user.unwrap();
@@ -275,54 +245,25 @@ pub async fn get_friend_requests(ctx: &mut EchoContext) -> RouteResult<Vec<Frien
     Ok(friend_requests)
 }
 
-/// Data necessary for creating a friend request. The server
-/// can supply the [`Curve25519PublicKey`] of a user to save
-/// on a separate fetch request.
-///
-/// Because Olm uses 3DH, a third set of keys, aptly titled
-/// "One-Time Keys" are required for establishing a session.
-/// The public part of the OTK pair is meant to be distributed,
-/// while the private part is kept inside the [`Account`]. To
-/// maintain atomicity, the new account state must be uploaded
-/// to the server, along with the other data.
-///
-/// [`Account`]: vodozemac::olm::Account
-#[derive(Deserialize, Serialize)]
-pub struct CreateFriendRequestData {
-    pub receiver: SnowflakeID,
-    pub one_time_key: Curve25519PublicKey,
-    pub new_account: Encrypted<AccountPickle>
-}
-
 #[route("users.friends.requests.create")]
 pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     let sender = ctx.user.unwrap();
 
-    let CreateFriendRequestData {
-        receiver,
-        one_time_key,
-        new_account
-    } = ctx.stream.receive().await?;
+    let receiver: SnowflakeID = ctx.stream.receive().await?;
 
     if sender == receiver {
         bail!(E::InvalidData);
     }
 
-    let mut tx = ctx
-        .pool
-        .begin()
-        .await
-        .context(E::Database)?;
-
-    let receiver_exists = exists!(
+    let user_exists = exists!(
         &ctx.pool,
         "SELECT 1 FROM users WHERE id = $1",
         receiver
     );
 
-    if !receiver_exists {
+    if !user_exists {
         bail!(E::User(U::NotFound));
-    }
+    };
 
     let stmt = "
         SELECT 1 FROM friendships WHERE user1 = $1 AND user2 = $1
@@ -342,21 +283,11 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     }
 
     execute!(
-        &mut *tx,
-        "INSERT INTO friend_requests (sender, receiver, one_time_key) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        &ctx.pool,
+        "INSERT INTO friend_requests (sender, receiver) VALUES ($1, $2)",
         sender,
-        receiver,
-        OlmPublicKey::from(one_time_key)
+        receiver
     );
-
-    execute!(
-        &mut *tx,
-        "UPDATE users SET olm_account = $2 WHERE id = $1",
-        sender,
-        new_account
-    );
-
-    tx.commit().await.context(E::Database)?;
 
     ctx
         .dispatcher
@@ -366,60 +297,21 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     Ok(())
 }
 
-/// The public keys necessary for Olm's 3DH.
-///
-/// These came from whoever sent the friend request.
-#[derive(Deserialize, Serialize)]
-pub struct FriendRequestKeys {
-    pub public_key: Curve25519PublicKey,
-    pub one_time_key: Curve25519PublicKey
-}
-
-/// The encrypted session opened on the receiver's client,
-/// and the pre-key message to be used for the sender's
-/// client to open its own session.
-#[derive(Deserialize, Serialize)]
-pub struct FriendRequestSessionData {
-    pub session: Encrypted<SessionPickle>,
-    pub pre_key_message: PreKeyMessage
-}
-
 #[route("users.friends.requests.accept")]
-pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
     let receiver = ctx.user.unwrap();
     let sender: SnowflakeID = ctx.stream.receive().await?;
 
-    let stmt = "
-        SELECT
-            pk.olm_public_key,
-            req.one_time_key
-        FROM friend_requests req
-        INNER JOIN users_public_keys pk ON pk.user_id = req.sender
-        WHERE req.sender = $1
-        AND req.receiver = $2
-    ";
-
-    let maybe_one_time_key: Option<(OlmPublicKey, OlmPublicKey)> = fetch_opt_as!(
+    let request_exists = exists!(
         &ctx.pool,
-        stmt,
+        "SELECT 1 FROM friend_requests WHERE sender = $1 AND receiver = $2",
         sender,
         receiver
     );
 
-    let keys = match maybe_one_time_key {
-        Some((pk, otk)) => FriendRequestKeys {
-            public_key: pk.into(),
-            one_time_key: otk.into()
-        },
-        None => bail!(E::User(U::NotFound))
-    };
-
-    ctx.stream.send(ok!(keys)).await?;
-
-    let FriendRequestSessionData {
-        session,
-        pre_key_message
-    } = ctx.stream.receive().await?;
+    if !request_exists {
+        bail!(E::User(U::NotFound));
+    }
 
     let mut tx = ctx
         .pool
@@ -434,28 +326,30 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         receiver
     );
 
+    let conversation_id = SNOWFLAKE_GEN.next();
+
     execute!(
         &mut *tx,
-        "INSERT INTO friendships (user1, user2) VALUES ($1, $2)",
+        "INSERT INTO conversations (id) VALUES ($1)",
+        conversation_id
+    );
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO friendships (user1, user2, conversation_id) VALUES ($1, $2, $3)",
         sender.min(receiver),
-        sender.max(receiver)
+        sender.max(receiver),
+        conversation_id
     );
 
-    execute!(
-        &mut *tx,
-        "INSERT INTO dm_sessions (owner, other, blob) VALUES ($1, $2, $3)",
-        receiver,
-        sender,
-        session
-    );
-
-    execute!(
-        &mut *tx,
-        "INSERT INTO pending_dm_sessions (waiting_on, other, pre_key_msg) VALUES ($1, $2, $3)",
-        sender,
-        receiver,
-        OlmPreKeyMessage::from(pre_key_message)
-    );
+    for user_id in [sender, receiver] {
+        execute!(
+            &mut *tx,
+            "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($1, $2)",
+            conversation_id,
+            user_id
+        );
+    }
 
     tx.commit().await.context(E::Database)?;
 
@@ -464,5 +358,5 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         .dispatch([sender], Event::UserAcceptedFriendRequest(receiver))
         .await;
 
-    Ok(())
+    Ok(conversation_id)
 }
