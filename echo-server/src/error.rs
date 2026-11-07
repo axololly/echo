@@ -2,7 +2,7 @@ use rootcause::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::routes::{DirectMessageRouteError, GroupRouteError, UserRouteError};
+use crate::routes::{GroupRouteError, MessagesRouteError, UserRouteError};
 
 /// An error related to accessing a route.
 #[derive(Clone, Debug, Deserialize, Error, Serialize)]
@@ -29,11 +29,11 @@ pub enum RouteError {
     #[error("user route error")]
     User(#[from] UserRouteError),
 
-    #[error("direct message route error")]
-    DirectMessage(#[from] DirectMessageRouteError),
-
     #[error("group route error")]
-    Group(#[from] GroupRouteError)
+    Group(#[from] GroupRouteError),
+
+    #[error("messages route error")]
+    Messages(#[from] MessagesRouteError)
 }
 
 pub type RouteResult<T> = Result<T, RouteError>;

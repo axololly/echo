@@ -54,38 +54,39 @@ pub struct TaskContext {
 #[rename(RemoveUnusedSessionData)]
 pub async fn remove_unused_session_data(ctx: TaskContext) -> Result<()> {
     let clear_megolm_messages_stmt = "
-        DELETE FROM pending_group_message_keys pgmk
-        USING group_messages AS msg
+        DELETE FROM pending_message_keys pgmk
+        USING messages AS msg
         WHERE msg.id = pgmk.message_id
         AND NOT EXISTS (
-            SELECT 1 FROM group_members gm
-            WHERE gm.group_id = msg.group_id
+            SELECT 1 FROM conversation_members cm
+            WHERE cm.conversation_id = msg.conversation_id
+            AND cm.joined_at < msg.sent_at
             AND NOT EXISTS (
                 SELECT 1 FROM message_decryption_keys mdk
                 WHERE mdk.message_id = pgmk.message_id
-                AND mdk.user_id = gm.user_id
+                AND mdk.user_id = cm.user_id
             )
         )
     ";
 
     let clear_megolm_sessions_stmt = "
-        DELETE FROM group_session_keys AS gsk
+        DELETE FROM conversation_session_keys AS csk
         WHERE EXISTS (
             SELECT 1
-            FROM group_messages AS msg
-            WHERE msg.group_id = gsk.group_id
-              AND msg.author = gsk.sender
+            FROM messages AS msg
+            WHERE msg.conversation_id = csk.conversation_id
+              AND msg.author = csk.sender
               AND NOT EXISTS (
                   SELECT 1
-                  FROM pending_group_message_keys AS pgmk
-                  WHERE pgmk.message_id = msg.id
-                    AND pgmk.epoch = gsk.epoch
+                  FROM pending_message_keys AS pmk
+                  WHERE pmk.message_id = msg.id
+                    AND pmk.epoch = gsk.epoch
               )
         )
         AND NOT EXISTS (
-            SELECT 1 FROM groups
-            WHERE groups.id = gsk.group_id
-              AND groups.epoch = gsk.epoch
+            SELECT 1 FROM conversations c
+            WHERE c.id = csk.conversation_id
+              AND c.epoch = csk.epoch
         )
     ";
 
