@@ -1,37 +1,70 @@
 use chrono::Utc;
-use echo_types::{Compressable, Compressed, Encrypted, Message, MessageBody, MessageHistoryParams, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxOlmMessage};
+use echo_types::{BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, MessageHistoryParams, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::QueryBuilder;
 use thiserror::Error;
-use vodozemac::olm::{OlmMessage, SessionPickle};
+use vodozemac::megolm::{GroupSessionPickle, MegolmMessage, SessionKey};
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
 
 /// An error related to direct messaging.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum DirectMessageRouteError {
-    #[error("sender has no Olm session with the receiver")]
+    #[error("sender has no session with the receiver")]
     NoSessionFound
 }
 
 use DirectMessageRouteError as DM;
 
+/// Encrypted data for a DM session.
+#[derive(Deserialize, Serialize)]
+pub struct EncryptedDmSession {
+    pub sender: Encrypted<GroupSessionPickle>,
+    pub receiver: CryptoBox<SessionKey>,
+    pub receiver_box_key: BoxPublicKey
+}
+
 #[route("dms.sessions.get")]
-pub async fn get_dm_session(ctx: &mut EchoContext) -> RouteResult<Encrypted<SessionPickle>> {
-    let sender = ctx.user.unwrap();
+pub async fn get_dm_session(ctx: &mut EchoContext) -> RouteResult<EncryptedDmSession> {
+    let sender_id = ctx.user.unwrap();
 
-    let receiver: SnowflakeID = ctx.stream.receive().await?;
+    let receiver_id: SnowflakeID = ctx.stream.receive().await?;
 
-    let maybe_session = fetch_opt_scalar!(
+    let maybe_sender = fetch_opt_scalar!(
         &ctx.pool,
-        "SELECT blob FROM dm_sessions WHERE owner = $1 AND other = $2",
-        sender,
-        receiver
+        "SELECT session FROM dm_sessions WHERE owner = $1 AND other = $2",
+        sender_id,
+        receiver_id
     );
 
-    maybe_session
-        .context(E::DirectMessage(DM::NoSessionFound))
+    let sender = maybe_sender.context(E::DirectMessage(DM::NoSessionFound))?;
+
+    let stmt = "
+        SELECT
+            upk.box_public_key,
+            dm.session_key
+        FROM dm_sessions dm
+        INNER JOIN users_public_keys upk
+            ON upk.user_id = dm.owner
+        WHERE dm.owner = $1
+        AND dm.other = $2
+    ";
+
+    let maybe_data = fetch_opt_as!(
+        &ctx.pool,
+        stmt,
+        receiver_id,
+        sender_id
+    );
+
+    let (receiver_box_key, receiver) = maybe_data.context(E::DirectMessage(DM::NoSessionFound))?;
+
+    Ok(EncryptedDmSession {
+        sender,
+        receiver,
+        receiver_box_key
+    })
 }
 
 /// Data necessary for sending a direct message to another user.
@@ -44,7 +77,7 @@ pub struct SendDmMessageData {
     pub replied_to: Option<SnowflakeID>,
     pub message_body: Encrypted<MessageBody>,
     pub key_for_sender: Encrypted<Secret>,
-    pub key_for_receiver: OlmMessage
+    pub key_for_receiver: MegolmMessage
 }
 
 #[route("dms.messages.send")]
@@ -60,9 +93,17 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
         key_for_receiver
     } = ctx.stream.receive_capped(4096).await?;
 
-    let sender_has_session = exists!(
+    let stmt = "
+        SELECT EXISTS (
+            SELECT 1 FROM dm_sessions WHERE owner = $1 AND other = $2
+        ) AND EXISTS (
+            SELECT 1 FROM dm_sessions WHERE owner = $2 AND other = $1
+        )
+    ";
+
+    let sender_has_session: bool = fetch_one_scalar!(
         &ctx.pool,
-        "SELECT 1 FROM dm_sessions WHERE owner = $1 AND other = $2",
+        stmt,
         sender,
         receiver
     );
@@ -102,7 +143,7 @@ pub async fn send_new_dm_message(ctx: &mut EchoContext) -> RouteResult<Message> 
         "INSERT INTO pending_dm_message_keys (message_id, waiting_on, blob) VALUES ($1, $2, $3)",
         message_id,
         receiver,
-        SqlxOlmMessage::from(key_for_receiver)
+        SqlxMegolmMessage::from(key_for_receiver)
     );
 
     tx.commit().await.context(E::Database)?;

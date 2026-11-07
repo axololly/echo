@@ -68,7 +68,6 @@ impl EchoRouter {
         router.register_route(accept_friend_request);
 
         // Inbox routes
-        router.register_route(establish_pending_dm_sessions);
         router.register_route(process_unread_dm_messages);
         router.register_route(process_unread_group_messages);
 

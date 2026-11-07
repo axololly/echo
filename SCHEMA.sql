@@ -22,8 +22,7 @@ CREATE TABLE users (
     about_me TEXT NOT NULL CHECK (char_length(about_me) <= 2000),
     status TEXT NOT NULL CHECK (char_length(status) <= 200),
     encrypted_secret BYTEA NOT NULL,
-    encrypted_state BYTEA NOT NULL,
-    olm_account BYTEA NOT NULL
+    encrypted_state BYTEA NOT NULL
 );
 
 CREATE TABLE users_public_keys (
@@ -32,7 +31,6 @@ CREATE TABLE users_public_keys (
         ON DELETE CASCADE,
 
     signature_verifier BYTEA NOT NULL,
-    olm_public_key BYTEA NOT NULL,
     box_public_key BYTEA NOT NULL,
 
     PRIMARY KEY (user_id)
@@ -74,9 +72,6 @@ CREATE TABLE friend_requests (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    one_time_key BYTEA NOT NULL
-        CHECK (length(one_time_key) = 32),
-
     sent_at TIMESTAMPTZ NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
 
@@ -85,30 +80,8 @@ CREATE TABLE friend_requests (
 
 CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver, sender);
 
--- For the other person to complete their session, they have to
--- read a pre-key message. These messages are stored here, and
--- once used to establish a session, they are discarded and the
--- new session is put in the dm_sessions table.
-CREATE TABLE pending_dm_sessions (
-    waiting_on INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    other INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    pre_key_msg BYTEA NOT NULL,
-
-    PRIMARY KEY (waiting_on, other)
-);
-
--- Created Olm sessions, along with who they're owned
+-- Created Megolm sessions, along with who they're owned
 -- by and who they are communicating to
---
--- (TODO: prevent misuse from changing the other ID)
 CREATE TABLE dm_sessions (
     owner INT8 NOT NULL
         REFERENCES users(id)
@@ -120,10 +93,16 @@ CREATE TABLE dm_sessions (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    blob BYTEA NOT NULL,
+    -- Encrypted under the owner's secret
+    session BYTEA NOT NULL,
+
+    -- Boxed for the other person
+    session_key BYTEA NOT NULL,
 
     PRIMARY KEY (owner, other)
 );
+
+CREATE INDEX idx_dm_sessions_other_owner ON dm_sessions(other, owner);
 
 -- Messages sent through a DM.
 -- These are encrypted blobs and the decryption keys

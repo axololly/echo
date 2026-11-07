@@ -11,7 +11,7 @@ pub enum Event {
     NewFriendRequest(SnowflakeID),
 
     /// Friend request was accepted by this user,
-    /// and the receiver must supply an Olm session
+    /// and the receiver must supply a DM session
     UserAcceptedFriendRequest(SnowflakeID),
 
     /// New DM message

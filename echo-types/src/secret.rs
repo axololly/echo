@@ -5,7 +5,7 @@ use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::{Aead as _
 use crypto_box::{ChaChaBox, aead::Aead as _};
 use hkdf::Hkdf;
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey, signature::{Signer, Verifier}};
-use rootcause::{Result, prelude::ResultExt};
+use rootcause::{Result, bail, prelude::ResultExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
 use sqlx::{Decode, Encode, encode::IsNull, postgres::PgTypeInfo};
@@ -256,9 +256,8 @@ impl<T> Encode<'_, sqlx::Postgres> for Encrypted<T> {
         &self,
         buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
     ) -> StdResult<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        let bytes = bitcode::serialize(self)?;
-
-        buf.extend_from_slice(&bytes);
+        buf.extend_from_slice(&self.nonce);
+        buf.extend_from_slice(&self.payload);
 
         Ok(IsNull::No)
     }
@@ -268,9 +267,17 @@ impl<T> Decode<'_, sqlx::Postgres> for Encrypted<T> {
     fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>) -> StdResult<Self, sqlx::error::BoxDynError> {
         let bytes = value.as_bytes()?;
 
-        let obj = bitcode::deserialize(bytes)?;
+        let Some((nonce, payload)) = bytes.split_at_checked(NONCE_SIZE) else {
+            bail!("output was too short to be decoded");
+        };
 
-        Ok(obj)
+        let nonce = nonce.try_into().unwrap();
+
+        Ok(Self {
+            payload: payload.to_vec(),
+            nonce,
+            _data: PhantomData
+        })
     }
 }
 
@@ -609,9 +616,8 @@ impl<T> Encode<'_, sqlx::Postgres> for CryptoBox<T> {
         &self,
         buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
     ) -> StdResult<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        let bytes = bitcode::serialize(self)?;
-
-        buf.extend_from_slice(&bytes);
+        buf.extend_from_slice(&self.nonce);
+        buf.extend_from_slice(&self.payload);
 
         Ok(IsNull::No)
     }
@@ -621,9 +627,17 @@ impl<T> Decode<'_, sqlx::Postgres> for CryptoBox<T> {
     fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>) -> StdResult<Self, sqlx::error::BoxDynError> {
         let bytes = value.as_bytes()?;
 
-        let obj = bitcode::deserialize(bytes)?;
+        let Some((nonce, payload)) = bytes.split_at_checked(NONCE_SIZE) else {
+            bail!("output was too short to be decoded");
+        };
 
-        Ok(obj)
+        let nonce = nonce.try_into().unwrap();
+
+        Ok(Self {
+            payload: payload.to_vec(),
+            nonce,
+            _data: PhantomData
+        })
     }
 }
 

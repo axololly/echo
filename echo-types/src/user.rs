@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Decode, Encode, postgres::PgTypeInfo, prelude::FromRow};
-use vodozemac::olm::AccountPickle;
 
 use crate::{AssetID, BoxPublicKey, Encrypted, OlmPublicKey, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
 
@@ -69,8 +68,7 @@ pub struct User {
     #[sqlx(rename = "encrypted_secret")]
     pub secret: PasswordProtected<Secret>,
     #[sqlx(rename = "encrypted_state")]
-    pub state: Encrypted<UserState>,
-    pub olm_account: Encrypted<AccountPickle>
+    pub state: Encrypted<UserState>
 }
 
 /// A user's public key information.
