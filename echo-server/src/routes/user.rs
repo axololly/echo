@@ -6,7 +6,7 @@ use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
 
 /// An error related to users.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -241,6 +241,49 @@ pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Vec<Friend>>
     Ok(friends)
 }
 
+#[route("users.friends.remove")]
+pub async fn remove_friend(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+    let target: SnowflakeID = ctx.stream.receive().await?;
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    let stmt = "
+        DELETE FROM friendships
+        WHERE user1 = $1
+        AND user2 = $2
+        RETURNING conversation_id
+    ";
+
+    let data: Option<SnowflakeID> = fetch_opt_scalar!(
+        &mut *tx,
+        stmt,
+        user.min(target),
+        user.max(target)
+    );
+
+    let Some(conversation_id) = data else {
+        bail!(E::User(U::NotFound));
+    };
+
+    execute!(
+        &ctx.pool,
+        "DELETE FROM conversations WHERE id = $1",
+        conversation_id
+    );
+
+    ctx.dispatcher.dispatch(
+        [target],
+        Event::NoLongerFriendsWith(user)
+    ).await;
+
+    Ok(())
+}
+
 #[route("users.friends.requests.get")]
 pub async fn get_friend_requests(ctx: &mut EchoContext) -> RouteResult<Vec<FriendRequest>> {
     let stmt = "
@@ -376,4 +419,42 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<Snowfla
         .await;
 
     Ok(conversation_id)
+}
+
+#[route("users.friends.requests.decline")]
+pub async fn decline_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+    let receiver = ctx.user.unwrap();
+    let sender: SnowflakeID = ctx.stream.receive().await?;
+
+    let friend_request_exists = exists!(
+        &ctx.pool,
+        "DELETE FROM friend_requests WHERE sender = $1 AND receiver = $2 RETURNING 1",
+        sender,
+        receiver
+    );
+
+    if !friend_request_exists {
+        bail!(E::User(U::NotFound));
+    }
+
+    Ok(())
+}
+
+#[route("users.friends.requests.cancel")]
+pub async fn cancel_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+    let sender: SnowflakeID = ctx.user.unwrap();
+    let receiver: SnowflakeID = ctx.stream.receive().await?;
+
+    let friend_request_exists = exists!(
+        &ctx.pool,
+        "DELETE FROM friend_requests WHERE sender = $1 AND receiver = $2 RETURNING 1",
+        sender,
+        receiver
+    );
+
+    if !friend_request_exists {
+        bail!(E::User(U::NotFound));
+    }
+
+    Ok(())
 }

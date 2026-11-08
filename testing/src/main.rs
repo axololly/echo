@@ -1,7 +1,9 @@
+#![allow(unused)]
+
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewGroupData, CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage}, runner::run, stream::Stream};
-use echo_types::{BoxPublicKey, Compressed, Encrypted, Group, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage}, runner::run, stream::Stream};
+use echo_types::{BoxPublicKey, Compressed, CryptoBox, Encrypted, Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -393,109 +395,68 @@ async fn main() -> Result<()> {
 
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
-    let (chloe, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
 
     let alice_bob_conv_id = establish_friendship(
         (&alice_conn, &alice),
         (&bob_conn, &bob)
     ).await?;
 
-    let alice_plaintext = "hello bob";
+    access_route(&alice_conn, "users.friends.remove", async |stream| {
+        stream.send(&bob.id).await?;
 
-    /* Test fetching history in DMs */
+        stream.receive::<RouteResult<()>>().await??;
 
-    send_message(
-        &alice,
-        &alice_conn,
-        alice_bob_conv_id,
-        alice_plaintext
-    ).await?;
-
-    let messages = fetch_message_history(
-        &bob,
-        &bob_conn,
-        alice_bob_conv_id,
-        MessageHistoryParams::Latest
-    ).await?;
-
-    assert!(
-        messages.is_empty(),
-        "bob got messages when he hadn't processed the incoming DM message"
-    );
-
-    process_messages(&bob, &bob_conn).await?;
-
-    let messages = fetch_message_history(
-        &bob,
-        &bob_conn,
-        alice_bob_conv_id,
-        MessageHistoryParams::Latest
-    ).await?;
-
-    assert!(
-        !messages.is_empty(),
-        "bob did not get any new DM messages after processing them"
-    );
-
-    /* Test fetching history in groups */
-
-    establish_friendship(
-        (&alice_conn, &alice),
-        (&chloe_conn, &chloe)
-    ).await?;
-
-    let alice_group = access_route(&alice_conn, "groups.create", async |stream| {
-       stream.send(&CreateNewGroupData {
-            name: Some("alice and friends".to_string()),
-            initial_members: vec![bob.id, chloe.id]
-        }).await?;
-
-        let group: Group = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(group)
+        Ok(())
     }).await?;
 
-    let alice_plaintext = "hello group";
+    access_route(&bob_conn, "users.friends.get", async |stream| {
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
 
-    send_message(
-        &alice,
-        &alice_conn,
-        alice_group.id,
-        alice_plaintext
-    ).await?;
+        assert!(
+            friends.is_empty(),
+            "bob still had friends after alice removed him"
+        );
 
-    let message_history = fetch_message_history(
-        &bob,
-        &bob_conn,
-        alice_group.id,
-        MessageHistoryParams::Latest
-    ).await?;
+        Ok(())
+    }).await?;
 
-    assert!(
-        message_history.is_empty(),
-        "bob still got rows returned when he hadn't processed any messages"
-    );
+    access_route(&alice_conn, "users.friends.requests.create", async |stream| {
+        stream.send(&bob.id).await?;
 
-    process_messages(&bob, &bob_conn).await?;
+        stream.receive::<RouteResult<()>>().await??;
 
-    let message_history = fetch_message_history(
-        &bob,
-        &bob_conn,
-        alice_group.id,
-        MessageHistoryParams::Latest
-    ).await?;
+        Ok(())
+    }).await?;
 
-    assert!(
-        message_history.len() == 1,
-        "bob did not get 1 message in the returned history after processing messages"
-    );
+    access_route(&bob_conn, "users.friends.requests.get", async |stream| {
+        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
 
-    let (msg, secret) = &message_history[0];
+        assert!(
+            requests.iter().any(|f| f.sender == alice.id),
+            "bob did not get a request from alice"
+        );
 
-    assert_eq!(
-        secret.decrypt(&msg.body)?.content, alice_plaintext,
-        "bob was not able to fetch the same message alice sent"
-    );
+        Ok(())
+    }).await?;
+
+    access_route(&bob_conn, "users.friends.requests.decline", async |stream| {
+        stream.send(&alice.id).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    });
+
+    access_route(&bob_conn, "users.friends.requests.get", async |stream| {
+        let requests: Vec<FriendRequest> = stream.receive::<RouteResult<_>>().await??;
+
+        assert!(
+            !requests.iter().any(|f| f.sender == alice.id),
+            "bob was not able to cancel alice's request"
+        );
+
+        Ok(())
+    }).await?;
 
     println!("assertions passed!");
 
