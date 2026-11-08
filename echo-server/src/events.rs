@@ -24,6 +24,9 @@ pub enum Event {
         author_id: SnowflakeID
     },
 
+    /// Unfriended by another user
+    NoLongerFriendsWith(SnowflakeID),
+
     /// Group chat appearance updated
     GroupAppearanceUpdated {
         new_name: Option<String>,

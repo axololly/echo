@@ -63,9 +63,12 @@ impl EchoRouter {
         router.register_route(create_new_user);
         router.register_route(login);
         router.register_route(get_user_friends);
+        router.register_route(remove_friend);
         router.register_route(get_friend_requests);
         router.register_route(create_friend_request);
         router.register_route(accept_friend_request);
+        router.register_route(cancel_friend_request);
+        router.register_route(decline_friend_request);
 
         // Event listener route
         router.register_route(listen_to_events);
