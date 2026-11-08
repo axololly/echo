@@ -9,7 +9,7 @@ use crate::{AssetID, SnowflakeID};
 
 /// A member of a group chat, packaging
 /// their user ID and when they joined.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize, sqlx::Type)]
 pub struct GroupMember {
     pub user_id: SnowflakeID,
     pub joined_at: DateTime<Utc>
@@ -20,7 +20,7 @@ pub struct GroupMember {
 /// The members list is sorted by join time
 /// with oldest members at the beginning
 /// and newest members at the end.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
 pub struct Group {
     pub id: SnowflakeID,
     pub name: String,
