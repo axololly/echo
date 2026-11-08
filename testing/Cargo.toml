@@ -7,6 +7,7 @@ edition = "2024"
 bitcode = { version = "0.6.9", features = ["serde"] }
 echo-server = { path = "../echo-server" }
 echo-types = { path = "../echo-types" }
+open = "5.4.5"
 pgtemp = "0.7.1"
 quinn = "0.11.12"
 rcgen = "0.14.10"

@@ -242,3 +242,16 @@ CREATE TABLE pending_message_keys (
 
     PRIMARY KEY (message_id, epoch)
 );
+
+CREATE TABLE message_attachments (
+    message_id INT8
+        REFERENCES messages(id)
+        ON UPDATE CASCADE
+        ON DELETE SET NULL,
+
+    asset_id "AssetID" NOT NULL,
+
+    PRIMARY KEY (message_id, asset_id)
+);
+
+CREATE INDEX idx_message_attachments_asset_id ON message_attachments(asset_id, message_id);

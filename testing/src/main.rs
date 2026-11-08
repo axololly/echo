@@ -1,15 +1,16 @@
 #![allow(unused)]
 
-use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
+use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EditMessageData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
-use echo_types::{BoxPublicKey, Compressed, CryptoBox, Encrypted, Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
+use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Encrypted, Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
+use tokio::fs;
 use vodozemac::megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
@@ -205,11 +206,17 @@ async fn send_message(
     user: &User,
     user_conn: &quinn::Connection,
     conversation_id: SnowflakeID,
-    message: &str
+    message: &str,
+    attachments: Vec<Attachment>
 ) -> Result<(Message, Secret)> {
     let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
 
     let message_secret = Secret::random();
+
+    let encrypted_attachments: Vec<_> = attachments
+        .into_iter()
+        .map(|a| message_secret.encrypt(&a))
+        .collect();
 
     access_route(user_conn, "messages.sessions.ensure", async |stream| {
         stream.send(&conversation_id).await?;
@@ -262,6 +269,8 @@ async fn send_message(
             key_for_author: user_secret.encrypt(&message_secret),
             key_for_others: session.encrypt(message_secret)
         }).await?;
+
+        stream.send(&encrypted_attachments).await?;
 
         let msg = stream.receive::<RouteResult<Message>>().await??;
 
@@ -378,6 +387,49 @@ async fn update_message_pin(
     }).await
 }
 
+fn load_attachment_from_disk(path: impl AsRef<Path>) -> Result<Attachment> {
+    let path = path.as_ref();
+
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("failed to extract UTF-8 path name")?;
+
+    let data = std::fs::read(path)?;
+
+    Ok(Attachment {
+        filename: name.to_string(),
+        data
+    })
+}
+
+fn save_attachment_to_disk(attachment: &Attachment) -> Result<PathBuf> {
+    let path = Path::new("/tmp").join(&attachment.filename);
+
+    std::fs::write(
+        &path,
+        &attachment.data
+    )?;
+
+    Ok(path)
+}
+
+async fn fetch_attachment(
+    user_conn: &quinn::Connection,
+    asset_id: AssetID,
+    secret: Secret
+) -> Result<Attachment> {
+    access_route(user_conn, "messages.attachments.get", async |stream| {
+        stream.send(&asset_id).await?;
+
+        let enc: Encrypted<Attachment> = stream.receive::<RouteResult<_>>().await??;
+
+        let atch = secret.decrypt(&enc)?;
+
+        Ok(atch)
+    }).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -413,6 +465,12 @@ async fn main() -> Result<()> {
 
     let key = PrivatePkcs8KeyDer::from_pem_slice(signing_key.serialize_pem().as_bytes())?;
 
+    let asset_storage_path = "/tmp/asset-storage";
+
+    if std::fs::exists(asset_storage_path)? {
+        std::fs::remove_dir_all(asset_storage_path)?;
+    }
+
     // Start the server up
     tokio::spawn(run(
         SERVER_ADDR,
@@ -420,7 +478,8 @@ async fn main() -> Result<()> {
         key.into(),
         10,
         Arc::new(EchoRouter::new()),
-        pool
+        pool,
+        asset_storage_path
     ));
 
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
@@ -431,51 +490,51 @@ async fn main() -> Result<()> {
         (&bob_conn, &bob)
     ).await?;
 
+    let cat_photo = load_attachment_from_disk("/home/axo/dev/rust/echo-prototypes/cat.jpeg")?;
+
+    // TOOD: make size test a separate case
     let (msg, msg_secret) = send_message(
         &alice,
         &alice_conn,
         alice_bob_conv_id,
-        "hello bob"
+        "hello bob",
+        vec![cat_photo.clone()]
     ).await?;
 
-    access_route(&alice_conn, "messages.edit", async |stream| {
-        stream.send(&EditMessageData {
-            message_id: msg.id,
-            new_body: msg_secret.encrypt(&MessageBody {
-                content: "hello bob (edited)".to_string()
-            })
-        }).await?;
+    let _same_msg = fetch_message(&alice_conn, msg.id).await?;
 
-        stream.receive::<RouteResult<()>>().await??;
+    for asset_id in msg.attachments {
+        let attachment = fetch_attachment(
+            &alice_conn,
+            asset_id,
+            msg_secret
+        ).await?;
 
-        Ok(())
-    }).await?;
+        let path = save_attachment_to_disk(&attachment)?;
 
-    let new_msg = fetch_message(&bob_conn, msg.id).await?;
+        open::that(path)?;
+    }
 
-    let new_body = msg_secret.decrypt(&new_msg.body)?;
+    let too_many_attachments = std::iter::repeat_n(cat_photo, 100)
+        .enumerate()
+        .map(|(idx, a)| Attachment {
+            filename: format!("cat{idx}.jpeg"),
+            data: a.data
+        })
+        .collect();
 
-    assert_eq!(
-        new_body.content, "hello bob (edited)",
-        "new body content was not as expected"
-    );
-
-    access_route(&alice_conn, "messages.delete", async |stream| {
-        stream.send(&msg.id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    let fetch_result = fetch_message(&alice_conn, msg.id).await;
+    let send_result = send_message(
+        &alice,
+        &alice_conn,
+        alice_bob_conv_id,
+        "hi bob",
+        too_many_attachments
+    ).await;
 
     assert!(
-        fetch_result.is_err(),
-        "alice was able to fetch a deleted message"
+        send_result.is_err(),
+        "alice was able to send a message with too many attachments"
     );
-
-    println!("assertions passed!");
 
     Ok(())
 }

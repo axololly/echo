@@ -233,27 +233,27 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         bail!(E::Group(G::GroupNotFound));
     }
 
-    let (name, avatar, created_at, invite_code, locked) = fetch_one_as!(
+    let stmt = r#"
+        SELECT
+            g.*,
+            ARRAY(
+                SELECT
+                    user_id,
+                    joined_at
+                FROM conversation_members
+                WHERE conversation_id = g.id
+            ) AS "members"
+        FROM groups g
+        WHERE g.id = $1
+        "#;
+
+    let group: Group = fetch_one_as!(
         &ctx.pool,
-        "SELECT name, avatar, created_at, invite_code, locked FROM groups WHERE id = $1",
+        stmt,
         group_id
     );
 
-    let members = fetch_all_as!(
-        &ctx.pool,
-        "SELECT user_id, joined_at FROM conversation_members WHERE conversation_id = $1",
-        group_id
-    );
-
-    Ok(Group {
-        id: group_id,
-        name,
-        avatar,
-        members,
-        created_at,
-        invite_code,
-        locked
-    })
+    Ok(group)
 }
 
 /// Get the user ID of a group's owner.

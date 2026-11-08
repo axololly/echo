@@ -26,6 +26,12 @@ impl sqlx::Type<sqlx::Postgres> for AssetID {
     }
 }
 
+impl sqlx::postgres::PgHasArrayType for AssetID {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::array_of("\"AssetID\"")
+    }
+}
+
 impl sqlx::Encode<'_, sqlx::Postgres> for AssetID {
     fn encode_by_ref(
         &self,

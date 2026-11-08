@@ -1,4 +1,4 @@
-use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
+use std::{net::ToSocketAddrs, path::Path, sync::Arc, time::Duration};
 
 use echo_types::SnowflakeID;
 use rootcause::{Result, option_ext::OptionExt};
@@ -7,7 +7,7 @@ use sqlx::postgres::PgPool;
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{backoffice::{TaskContext, run_all_tasks}, events::EventDispatcher, router::{EchoContext, EchoRouter}, stream::Stream};
+use crate::{backoffice::{TaskContext, run_all_tasks}, events::EventDispatcher, router::{EchoContext, EchoRouter}, asset_storage::AssetStorage, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -25,7 +25,8 @@ pub async fn run(
     key: PrivateKeyDer<'static>,
     max_connections: usize,
     router: Arc<EchoRouter>,
-    pool: PgPool
+    pool: PgPool,
+    asset_dir: impl AsRef<Path>
 ) -> Result<()> {
     let mut crypto = RustlsServerConfig::builder()
         .with_no_client_auth()
@@ -54,6 +55,10 @@ pub async fn run(
 
     let event_dispatcher = EventDispatcher::default();
 
+    let asset_storage = AssetStorage::new(
+        asset_dir.as_ref().to_path_buf()
+    );
+
     {
         let pool = pool.clone();
 
@@ -81,7 +86,8 @@ pub async fn run(
             conn,
             router.clone(),
             pool.clone(),
-            event_dispatcher.clone()
+            event_dispatcher.clone(),
+            asset_storage.clone()
         ));
     }
 
@@ -96,7 +102,8 @@ async fn handle_incoming_requests(
     parent: quinn::Connection,
     router: Arc<EchoRouter>,
     pool: PgPool,
-    dispatcher: EventDispatcher
+    dispatcher: EventDispatcher,
+    asset_storage: AssetStorage
 ) -> Result<()> {
     let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
 
@@ -109,6 +116,7 @@ async fn handle_incoming_requests(
             route_name,
             stream,
             dispatcher: dispatcher.clone(),
+            asset_storage: asset_storage.clone(),
             pool: pool.clone(),
             user: { *authenticated_user.lock().await }
         };

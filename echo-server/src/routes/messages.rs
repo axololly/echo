@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use echo_server_derive::route;
-use echo_types::{__convert_encrypted_to_crypto_box, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, prelude::FromRow};
@@ -23,7 +23,10 @@ pub enum MessagesRouteError {
     MessageNotFound,
 
     #[error("too many pinned messages")]
-    TooManyPinnedMessages
+    TooManyPinnedMessages,
+
+    #[error("asset not found")]
+    AssetNotFound
 }
 
 use MessagesRouteError as M;
@@ -245,7 +248,7 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         message_body,
         key_for_author,
         key_for_others
-    } = ctx.stream.receive_capped(4096).await?;
+    } = ctx.stream.receive_capped(4096).await?; // 4KB limit
 
     if !is_part_of_conversation(ctx, conversation_id).await? {
         bail!(E::Messages(M::ConversationNotFound));
@@ -276,6 +279,9 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         bail!(E::Messages(M::SessionNotFound));
     }
 
+    // 250KB limit
+    let attachments: Vec<Encrypted<Attachment>> = ctx.stream.receive_capped(250_000).await?;
+
     let message_id = SNOWFLAKE_GEN.next();
 
     let mut tx = ctx
@@ -303,6 +309,29 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         author_id,
         &message_body
     );
+
+    let mut attachment_ids = vec![];
+
+    for attachment in attachments {
+        let attachment_data = bitcode::serialize(&attachment)
+            .context(E::InvalidData)?;
+
+        let asset_id = ctx
+            .asset_storage
+            .upload(attachment_data)
+            .await
+            .context(E::Database)
+            .attach("while uploading data to asset storage")?;
+
+        attachment_ids.push(asset_id);
+
+        execute!(
+            &mut *tx,
+            "INSERT INTO message_attachments (message_id, asset_id) VALUES ($1, $2)",
+            message_id,
+            asset_id
+        );
+    }
 
     let stmt = "
         INSERT INTO message_decryption_keys (
@@ -355,7 +384,8 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         author: author_id,
         body: message_body,
         sent_at: Utc::now(),
-        pinned: false
+        pinned: false,
+        attachments: attachment_ids
     })
 }
 
@@ -650,9 +680,20 @@ pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         bail!(E::Messages(M::MessageNotFound));
     }
 
+    let stmt = r#"
+        SELECT
+            msg.*,
+            ARRAY(
+                SELECT asset_id FROM message_attachments
+                WHERE message_id = msg.id
+            ) AS "attachments"
+        FROM messages msg
+        WHERE msg.id = $1
+    "#;
+
     let message: Message = fetch_one_as!(
         &ctx.pool,
-        "SELECT * FROM messages WHERE id = $1",
+        stmt,
         message_id
     );
 
@@ -720,6 +761,21 @@ pub async fn delete_message(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::Messages(M::MessageNotFound));
     }
 
+    let asset_ids: Vec<AssetID> = fetch_all_scalar!(
+        &ctx.pool,
+        "SELECT asset_id FROM message_attachments WHERE message_id = $1",
+        message_id
+    );
+
+    for id in asset_ids {
+        ctx
+            .asset_storage
+            .delete(id)
+            .await
+            .context(E::Database)
+            .attach("while deleting asset from asset storage")?;
+    }
+
     execute!(
         &ctx.pool,
         "DELETE FROM messages WHERE id = $1",
@@ -736,4 +792,22 @@ pub async fn delete_message(ctx: &mut EchoContext) -> RouteResult<()> {
     ).await?;
 
     Ok(())
+}
+
+#[route("messages.attachments.get")]
+pub async fn get_message_attachment(ctx: &mut EchoContext) -> RouteResult<Encrypted<Attachment>> {
+    let id: AssetID = ctx.stream.receive().await?;
+
+    let asset = ctx
+        .asset_storage
+        .try_fetch(id)
+        .await
+        .context(E::Database)?
+        .context(E::Messages(M::AssetNotFound))?;
+
+    let attachment = bitcode::deserialize(&asset)
+        .context(E::Messages(M::AssetNotFound))
+        .attach("while deserialising asset into Encrypted attachment")?;
+
+    Ok(attachment)
 }
