@@ -1,3 +1,6 @@
+mod asset;
+pub use asset::*;
+
 mod events;
 pub use events::*;
 

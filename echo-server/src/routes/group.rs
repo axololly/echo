@@ -235,6 +235,25 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let stmt = "
         SELECT
+            user_id,
+            joined_at
+        FROM conversation_members
+        WHERE conversation_id = $1
+    ";
+
+    let raw_members = fetch_all_as!(
+        &ctx.pool,
+        stmt,
+        group_id
+    );
+
+    let members = raw_members
+        .into_iter()
+        .map(|(user_id, joined_at)| GroupMember { user_id, joined_at })
+        .collect();
+
+    let stmt = "
+        SELECT
             g.name,
             g.avatar,
             c.created_at,
@@ -243,7 +262,7 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         FROM groups g
         INNER JOIN conversations c
             ON c.id = g.id
-        WHERE id = $1
+        WHERE g.id = $1
     ";
 
     let (name, avatar, created_at, invite_code, locked) = fetch_one_as!(
@@ -252,17 +271,11 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         group_id
     );
 
-    let members = fetch_all_as!(
-        &ctx.pool,
-        "SELECT user_id, joined_at FROM conversation_members WHERE conversation_id = $1",
-        group_id
-    );
-
     Ok(Group {
         id: group_id,
         name,
-        avatar,
         members,
+        avatar,
         created_at,
         invite_code,
         locked

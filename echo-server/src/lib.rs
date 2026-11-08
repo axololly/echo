@@ -3,6 +3,7 @@ pub mod events;
 pub mod router;
 pub mod routes;
 pub mod runner;
+pub mod asset_storage;
 pub mod stream;
 
 mod backoffice;
