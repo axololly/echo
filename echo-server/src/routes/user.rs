@@ -1,13 +1,12 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, BoxPublicKey, CryptoBox, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserPublicKeys, UserState};
+use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserPublicKeys, UserState};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use vodozemac::megolm::{GroupSessionPickle, SessionKey};
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, route, router::EchoContext};
 
 /// An error related to users.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -226,9 +225,9 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 #[route("users.friends.get")]
 pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Vec<Friend>> {
     let stmt = r#"
-        SELECT user1 AS "id", friends_since FROM friendships WHERE user2 = $1
+        SELECT user1 AS "user_id", friends_since, conversation_id FROM friendships WHERE user2 = $1
         UNION ALL
-        SELECT user2 AS "id", friends_since FROM friendships WHERE user1 = $1
+        SELECT user2 AS "user_id", friends_since, conversation_id FROM friendships WHERE user1 = $1
     "#;
 
     let user_id = ctx.user.unwrap();
@@ -263,13 +262,6 @@ pub async fn get_friend_requests(ctx: &mut EchoContext) -> RouteResult<Vec<Frien
     Ok(friend_requests)
 }
 
-/// Data for one side of a DM session.
-#[derive(Deserialize, Serialize)]
-pub struct DmSessionData {
-    pub session: Encrypted<GroupSessionPickle>,
-    pub session_key: CryptoBox<SessionKey>
-}
-
 #[route("users.friends.requests.create")]
 pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     let sender = ctx.user.unwrap();
@@ -280,19 +272,13 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::InvalidData);
     }
 
-    let mut tx = ctx
-        .pool
-        .begin()
-        .await
-        .context(E::Database)?;
-
-    let data: Option<BoxPublicKey> = fetch_opt_scalar!(
+    let user_exists = exists!(
         &ctx.pool,
-        "SELECT box_public_key FROM users_public_keys WHERE user_id = $1",
+        "SELECT 1 FROM users WHERE id = $1",
         receiver
     );
 
-    let Some(receiver_box_public_key) = data else {
+    if !user_exists {
         bail!(E::User(U::NotFound));
     };
 
@@ -313,32 +299,12 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::User(U::AlreadyFriends));
     }
 
-    ctx.stream.send(ok!(receiver_box_public_key)).await?;
-
-    let DmSessionData {
-        session,
-        session_key
-    } = ctx.stream.receive().await?;
-
     execute!(
-        &mut *tx,
+        &ctx.pool,
         "INSERT INTO friend_requests (sender, receiver) VALUES ($1, $2)",
         sender,
         receiver
     );
-
-    let stmt = "INSERT INTO dm_sessions (owner, other, session, session_key) VALUES ($1, $2, $3, $4)";
-
-    execute!(
-        &mut *tx,
-        stmt,
-        sender,
-        receiver,
-        session,
-        session_key
-    );
-
-    tx.commit().await.context(E::Database)?;
 
     ctx
         .dispatcher
@@ -349,40 +315,20 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
 }
 
 #[route("users.friends.requests.accept")]
-pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
+pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<SnowflakeID> {
     let receiver = ctx.user.unwrap();
     let sender: SnowflakeID = ctx.stream.receive().await?;
 
-    let stmt = "
-        SELECT
-            upk.box_public_key,
-            dms.session_key
-        FROM friend_requests req
-        INNER JOIN users_public_keys upk
-            ON upk.user_id = req.sender
-        INNER JOIN dm_sessions dms
-            ON dms.owner = req.sender
-        WHERE req.sender = $1
-        AND req.receiver = $2
-    ";
-
-    let maybe_box_pub_key: Option<(BoxPublicKey, CryptoBox<SessionKey>)> = fetch_opt_as!(
+    let request_exists = exists!(
         &ctx.pool,
-        stmt,
+        "SELECT 1 FROM friend_requests WHERE sender = $1 AND receiver = $2",
         sender,
         receiver
     );
 
-    let Some((box_public_key, sender_session_key)) = maybe_box_pub_key else {
+    if !request_exists {
         bail!(E::User(U::NotFound));
-    };
-
-    ctx.stream.send(ok!((box_public_key, &sender_session_key))).await?;
-
-    let DmSessionData {
-        session,
-        session_key
-    } = ctx.stream.receive().await?;
+    }
 
     let mut tx = ctx
         .pool
@@ -397,21 +343,30 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         receiver
     );
 
+    let conversation_id = SNOWFLAKE_GEN.next();
+
     execute!(
         &mut *tx,
-        "INSERT INTO friendships (user1, user2) VALUES ($1, $2)",
-        sender.min(receiver),
-        sender.max(receiver)
+        "INSERT INTO conversations (id) VALUES ($1)",
+        conversation_id
     );
 
     execute!(
         &mut *tx,
-        "INSERT INTO dm_sessions (owner, other, session, session_key) VALUES ($1, $2, $3, $4)",
-        receiver,
-        sender,
-        session,
-        session_key
+        "INSERT INTO friendships (user1, user2, conversation_id) VALUES ($1, $2, $3)",
+        sender.min(receiver),
+        sender.max(receiver),
+        conversation_id
     );
+
+    for user_id in [sender, receiver] {
+        execute!(
+            &mut *tx,
+            "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($1, $2)",
+            conversation_id,
+            user_id
+        );
+    }
 
     tx.commit().await.context(E::Database)?;
 
@@ -420,5 +375,5 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         .dispatch([sender], Event::UserAcceptedFriendRequest(receiver))
         .await;
 
-    Ok(())
+    Ok(conversation_id)
 }

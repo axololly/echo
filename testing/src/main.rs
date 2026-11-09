@@ -1,14 +1,14 @@
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewGroupData, CreateNewUserData, DmSessionData, EncryptedDmSession, GetDmMessageHistoryData, GetGroupMessageHistoryData, GroupChatSession, SendDmMessageData, SendGroupMessageData, UnprocessedGroupMessage}, runner::run, stream::Stream};
-use echo_types::{BoxPublicKey, Compressed, CryptoBox, Encrypted, Group, Message, MessageBody, MessageHistoryParams, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewGroupData, CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage}, runner::run, stream::Stream};
+use echo_types::{BoxPublicKey, Compressed, Encrypted, Group, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
-use vodozemac::megolm::{DecryptionError, GroupSession, InboundGroupSession, MegolmMessage, SessionConfig as MegolmSessionConfig, SessionKey};
+use vodozemac::megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig};
 
 // Helper function to turn a raw address into a [`SocketAddr`].
 fn into_socket_addr(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
@@ -173,106 +173,44 @@ async fn connect_and_create_account(
     Ok((account, parent))
 }
 
-struct DmSession {
-    sender: GroupSession,
-    receiver: InboundGroupSession
-}
-
-impl DmSession {
-    pub fn encrypt(&mut self, plaintext: impl AsRef<[u8]>) -> MegolmMessage {
-        self.sender.encrypt(plaintext)
-    }
-
-    pub fn decrypt(&mut self, message: MegolmMessage) -> Result<Vec<u8>, DecryptionError> {
-        let dec = self.receiver.decrypt(&message)?;
-
-        Ok(dec.plaintext)
-    }
-}
-
 /// Form a friend request between two users, and get the Olm sessions used
 /// to communicate for the pair
 async fn establish_friendship(
     user1_data: (&quinn::Connection, &User),
     user2_data: (&quinn::Connection, &User)
-) -> Result<(DmSession, DmSession)> {
+) -> Result<SnowflakeID> {
     let (conn1, user1) = user1_data;
     let (conn2, user2) = user2_data;
 
-    let user1_secret = user1.secret.unlock(DEFAULT_PASSWORD)?;
-    let user2_secret = user2.secret.unlock(DEFAULT_PASSWORD)?;
-
-    let user1_to_user2 = access_route(conn1, "users.friends.requests.create", async |stream| {
+    access_route(conn1, "users.friends.requests.create", async |stream| {
         stream.send(&user2.id).await?;
 
-        let their_public_key: BoxPublicKey = stream.receive::<RouteResult<_>>().await??;
-
-        let session = GroupSession::new(MegolmSessionConfig::version_1());
-
-        let session_key = session.session_key();
-
-        stream.send(&DmSessionData {
-            session: user1_secret.encrypt(&session.pickle()),
-            session_key: user1_secret.box_for(&session_key, their_public_key)
-        }).await?;
-
         stream.receive::<RouteResult<()>>().await??;
 
-        Ok(session)
+        Ok(())
     }).await?;
 
-    let user2_to_user1 = access_route(conn2, "users.friends.requests.accept", async |stream| {
+    access_route(conn2, "users.friends.requests.accept", async |stream| {
         stream.send(&user1.id).await?;
 
-        let (box_key, _): (BoxPublicKey, CryptoBox<SessionKey>) = stream.receive::<RouteResult<_>>().await??;
+        let conversation_id: SnowflakeID = stream.receive::<RouteResult<_>>().await??;
 
-        let session = GroupSession::new(MegolmSessionConfig::version_1());
-
-        let data = DmSessionData {
-            session: user2_secret.encrypt(&session.pickle()),
-            session_key: user2_secret.box_for(&session.session_key(), box_key)
-        };
-
-        stream.send(&data).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(session)
-    }).await?;
-
-    let key = user1_to_user2.session_key();
-
-    let user1_to_user2 = DmSession {
-        sender: user1_to_user2,
-        receiver: InboundGroupSession::new(
-            &user2_to_user1.session_key(),
-            MegolmSessionConfig::version_1()
-        )
-    };
-
-    let user2_to_user1 = DmSession {
-        sender: user2_to_user1,
-        receiver: InboundGroupSession::new(
-            &key,
-            MegolmSessionConfig::version_1()
-        )
-    };
-
-    Ok((user1_to_user2, user2_to_user1))
+        Ok(conversation_id)
+    }).await
 }
 
-async fn send_group_message(
+async fn send_message(
     user: &User,
     user_conn: &quinn::Connection,
-    group_id: SnowflakeID,
+    conversation_id: SnowflakeID,
     message: &str
 ) -> Result<Message> {
     let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
 
     let message_secret = Secret::random();
 
-    access_route(user_conn, "groups.sessions.ensure", async |stream| {
-        stream.send(&group_id).await?;
+    access_route(user_conn, "messages.sessions.ensure", async |stream| {
+        stream.send(&conversation_id).await?;
 
         let needs_uploading: bool = stream.receive::<RouteResult<_>>().await??;
 
@@ -290,7 +228,7 @@ async fn send_group_message(
             .map(|(id, pk)| (id, user_secret.box_for(&session_key, pk)))
             .collect();
 
-        let group_chat_session = GroupChatSession {
+        let group_chat_session = EncryptedChatSession {
             outbound: user_secret.encrypt(&session.pickle()),
             inbounds
         };
@@ -302,25 +240,25 @@ async fn send_group_message(
         Ok(())
     }).await?;
 
-    let mut sender: GroupSession = access_route(user_conn, "groups.sessions.get", async |stream| {
-        stream.send(&group_id).await?;
+    let mut session: GroupSession = access_route(user_conn, "messages.sessions.get", async |stream| {
+        stream.send(&conversation_id).await?;
 
-        let session: GroupChatSession = stream.receive::<RouteResult<_>>().await??;
+        let enc_session: EncryptedChatSession = stream.receive::<RouteResult<_>>().await??;
 
-        let out = user_secret.decrypt(&session.outbound)?;
+        let sender = user_secret.decrypt(&enc_session.outbound)?;
 
-        Ok(out.into())
+        Ok(sender.into())
     }).await?;
 
-    let message = access_route(user_conn, "groups.messages.send", async |stream| {
-        stream.send(&SendGroupMessageData {
-            group_id,
+    let message = access_route(user_conn, "messages.send", async |stream| {
+        stream.send(&SendMessageData {
+            conversation_id,
             replied_to: None,
             message_body: message_secret.encrypt(&MessageBody {
                 content: message.to_string()
             }),
             key_for_author: user_secret.encrypt(&message_secret),
-            key_for_others: sender.encrypt(message_secret)
+            key_for_others: session.encrypt(message_secret)
         }).await?;
 
         let msg = stream.receive::<RouteResult<Message>>().await??;
@@ -331,15 +269,15 @@ async fn send_group_message(
     Ok(message)
 }
 
-async fn process_group_messages(
+async fn process_messages(
     user: &User,
     user_conn: &quinn::Connection
 ) -> Result<HashMap<SnowflakeID, Secret>> {
     let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
     let mut message_secrets = HashMap::new();
 
-    access_route(user_conn, "inbox.messages.group.unread", async |stream| {
-        let mut unprocessed: HashMap<SnowflakeID, UnprocessedGroupMessage>;
+    access_route(user_conn, "messages.unread.process", async |stream| {
+        let mut unprocessed: HashMap<SnowflakeID, UnprocessedMessage>;
 
         loop {
             unprocessed = stream.receive::<RouteResult<_>>().await??;
@@ -350,7 +288,7 @@ async fn process_group_messages(
 
             let mut processed: HashMap<SnowflakeID, Encrypted<Secret>> = HashMap::new();
 
-            for (message_id, UnprocessedGroupMessage { box_public_key, session_key, message_key }) in unprocessed {
+            for (message_id, UnprocessedMessage { box_public_key, session_key, message_key }) in unprocessed {
                 let session_key = user_secret.unbox_from(&session_key, box_public_key)?;
 
                 let mut inbound = InboundGroupSession::new(
@@ -379,173 +317,33 @@ async fn process_group_messages(
     Ok(message_secrets)
 }
 
-enum Location {
-    Group(SnowflakeID),
-    DmWith(SnowflakeID)
-}
-
 async fn fetch_message_history(
     user: &User,
     user_conn: &quinn::Connection,
-    location: Location,
+    conversation_id: SnowflakeID,
     params: MessageHistoryParams
 ) -> Result<Vec<(Message, Secret)>> {
     let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
 
-    match location {
-        Location::Group(id) => {
-            access_route(user_conn, "groups.messages.history.get", async |stream| {
-                stream.send(&GetGroupMessageHistoryData {
-                    group_id: id,
-                    params,
-                    limit: 100
-                }).await?;
-
-                let data: Vec<(Message, Encrypted<Secret>)> = stream.receive::<RouteResult<Compressed<_>>>().await??.decompress();
-
-                let mut messages = vec![];
-
-                for (msg, enc) in data {
-                    let secret = user_secret.decrypt(&enc)?;
-
-                    messages.push((msg, secret));
-                }
-
-                Ok(messages)
-            }).await
-        },
-
-        Location::DmWith(id) => {
-            access_route(user_conn, "dms.messages.history.get", async |stream| {
-                stream.send(&GetDmMessageHistoryData {
-                    other: id,
-                    params,
-                    limit: 100
-                }).await?;
-
-                let data: Vec<(Message, Encrypted<Secret>)> = stream.receive::<RouteResult<Compressed<_>>>().await??.decompress();
-
-                let mut messages = vec![];
-
-                for (msg, enc) in data {
-                    let secret = user_secret.decrypt(&enc)?;
-
-                    messages.push((msg, secret));
-                }
-
-                Ok(messages)
-            }).await
-        },
-    }
-}
-
-async fn fetch_dm_session_for(
-    user: &User,
-    user_conn: &quinn::Connection,
-    target: SnowflakeID
-) -> Result<DmSession> {
-    let secret = user.secret.unlock(DEFAULT_PASSWORD)?;
-
-    access_route(user_conn, "dms.sessions.get", async |stream| {
-        stream.send(&target).await?;
-
-        let enc: EncryptedDmSession = stream.receive::<RouteResult<_>>().await??;
-
-        let sender = secret.decrypt(&enc.sender)?.into();
-        let receiver_key = secret.unbox_from(&enc.receiver, enc.receiver_box_key)?;
-
-        Ok(DmSession {
-            sender,
-            receiver: InboundGroupSession::new(
-                &receiver_key,
-                MegolmSessionConfig::version_1()
-            )
-        })
-    }).await
-}
-
-async fn send_dm_message(
-    user: &User,
-    user_conn: &quinn::Connection,
-    receiver: SnowflakeID,
-    session: &mut DmSession,
-    message: &str
-) -> Result<Message> {
-    let secret = user.secret.unlock(DEFAULT_PASSWORD)?;
-    let message_secret = Secret::random();
-
-    access_route(user_conn, "dms.messages.send", async |stream| {
-        stream.send(&SendDmMessageData {
-            receiver,
-            replied_to: None,
-            message_body: message_secret.encrypt(&MessageBody {
-                content: message.to_string()
-            }),
-            key_for_sender: secret.encrypt(&message_secret),
-            key_for_receiver: session.encrypt(message_secret)
+    access_route(user_conn, "messages.history.get", async |stream| {
+        stream.send(&GetMessageHistoryData {
+            conversation_id,
+            params,
+            limit: 100
         }).await?;
 
-        let message = stream.receive::<RouteResult<Message>>().await??;
+        let data: Vec<(Message, Encrypted<Secret>)> = stream.receive::<RouteResult<Compressed<_>>>().await??.decompress();
 
-        Ok(message)
-    }).await
-}
+        let mut messages = vec![];
 
-async fn process_dm_messages(
-    user: &User,
-    user_conn: &quinn::Connection
-) -> Result<HashMap<SnowflakeID, Secret>> {
-    let secret = user.secret.unlock(DEFAULT_PASSWORD)?;
+        for (msg, enc) in data {
+            let secret = user_secret.decrypt(&enc)?;
 
-    let mut secrets = HashMap::new();
-    let mut cache = HashMap::new();
-
-    access_route(user_conn, "inbox.messages.dm.unread", async |stream| {
-        let mut entries: HashMap<SnowflakeID, (SnowflakeID, MegolmMessage)>;
-
-        loop {
-            entries = stream.receive::<RouteResult<_>>().await??;
-
-            if entries.is_empty() {
-                break;
-            }
-
-            let mut processed = HashMap::new();
-
-            for (id, (author, msg)) in entries {
-                #[allow(clippy::map_entry)]
-                if !cache.contains_key(&author) {
-                    let fetched = fetch_dm_session_for(
-                        user,
-                        user_conn,
-                        author
-                    ).await?;
-
-                    cache.insert(author, fetched);
-                }
-
-                let session = cache.get_mut(&author).unwrap();
-
-                let message_secret = {
-                    let bytes = session.decrypt(msg)?;
-
-                    Secret::try_from_bytes(&bytes)
-                        .expect("invalid message secret")
-                };
-
-                secrets.insert(id, message_secret);
-                processed.insert(id, secret.encrypt(&message_secret));
-            }
-
-            stream.send(&processed).await?;
+            messages.push((msg, secret));
         }
 
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    Ok(secrets)
+        Ok(messages)
+    }).await
 }
 
 #[tokio::main]
@@ -597,7 +395,7 @@ async fn main() -> Result<()> {
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
     let (chloe, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
 
-    let (mut alice_to_bob, _bob_to_alice) = establish_friendship(
+    let alice_bob_conv_id = establish_friendship(
         (&alice_conn, &alice),
         (&bob_conn, &bob)
     ).await?;
@@ -606,18 +404,17 @@ async fn main() -> Result<()> {
 
     /* Test fetching history in DMs */
 
-    send_dm_message(
+    send_message(
         &alice,
         &alice_conn,
-        bob.id,
-        &mut alice_to_bob,
+        alice_bob_conv_id,
         alice_plaintext
     ).await?;
 
     let messages = fetch_message_history(
         &bob,
         &bob_conn,
-        Location::DmWith(alice.id),
+        alice_bob_conv_id,
         MessageHistoryParams::Latest
     ).await?;
 
@@ -626,12 +423,12 @@ async fn main() -> Result<()> {
         "bob got messages when he hadn't processed the incoming DM message"
     );
 
-    process_dm_messages(&bob, &bob_conn).await?;
+    process_messages(&bob, &bob_conn).await?;
 
     let messages = fetch_message_history(
         &bob,
         &bob_conn,
-        Location::DmWith(alice.id),
+        alice_bob_conv_id,
         MessageHistoryParams::Latest
     ).await?;
 
@@ -660,7 +457,7 @@ async fn main() -> Result<()> {
 
     let alice_plaintext = "hello group";
 
-    send_group_message(
+    send_message(
         &alice,
         &alice_conn,
         alice_group.id,
@@ -670,7 +467,7 @@ async fn main() -> Result<()> {
     let message_history = fetch_message_history(
         &bob,
         &bob_conn,
-        Location::Group(alice_group.id),
+        alice_group.id,
         MessageHistoryParams::Latest
     ).await?;
 
@@ -679,12 +476,12 @@ async fn main() -> Result<()> {
         "bob still got rows returned when he hadn't processed any messages"
     );
 
-    process_group_messages(&bob, &bob_conn).await?;
+    process_messages(&bob, &bob_conn).await?;
 
     let message_history = fetch_message_history(
         &bob,
         &bob_conn,
-        Location::Group(alice_group.id),
+        alice_group.id,
         MessageHistoryParams::Latest
     ).await?;
 

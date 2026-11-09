@@ -1,8 +1,11 @@
 use std::{collections::HashMap, ops::{Deref, DerefMut}, sync::Arc};
 
 use echo_types::{AssetID, GroupInvite, SnowflakeID};
+use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
+
+use crate::{error::RouteResult, fetch_all_scalar, router::EchoContext};
 
 /// An event that can be received in Echo.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -14,8 +17,12 @@ pub enum Event {
     /// and the receiver must supply a DM session
     UserAcceptedFriendRequest(SnowflakeID),
 
-    /// New DM message
-    NewDirectMessageFrom(SnowflakeID),
+    /// New message received
+    NewMessageReceived {
+        conversation_id: SnowflakeID,
+        message_id: SnowflakeID,
+        author_id: SnowflakeID
+    },
 
     /// Group chat appearance updated
     GroupAppearanceUpdated {
@@ -45,13 +52,6 @@ pub enum Event {
     GroupInviteRotated {
         group_id: SnowflakeID,
         new_invite: GroupInvite
-    },
-
-    /// New message sent in group
-    NewGroupMessage {
-        group_id: SnowflakeID,
-        author_id: SnowflakeID,
-        message_id: SnowflakeID
     }
 }
 
@@ -167,4 +167,22 @@ impl EventDispatcher {
             }
         }
     }
+}
+
+/// Dispatch the same [`Event`] to all current
+/// members of a conversation.
+pub async fn dispatch_event_for_conversation(
+    ctx: &mut EchoContext,
+    conversation_id: SnowflakeID,
+    event: Event
+) -> RouteResult<()> {
+    let members: Vec<SnowflakeID> = fetch_all_scalar!(
+        &ctx.pool,
+        "SELECT user_id FROM conversation_members WHERE conversation_id = $1",
+        conversation_id
+    );
+
+    ctx.dispatcher.dispatch(members, event).await;
+
+    Ok(())
 }

@@ -1,14 +1,11 @@
-mod direct_message;
-pub use direct_message::*;
-
 mod events;
 pub use events::*;
 
 mod group;
 pub use group::*;
 
-mod inbox;
-pub use inbox::*;
+mod messages;
+pub use messages::*;
 
 mod user;
 pub use user::*;

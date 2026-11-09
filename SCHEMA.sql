@@ -36,6 +36,13 @@ CREATE TABLE users_public_keys (
     PRIMARY KEY (user_id)
 );
 
+-- Information about conversations (DMs or groups)
+CREATE TABLE conversations (
+    id INT8 PRIMARY KEY,
+    epoch INT8 NOT NULL CHECK (epoch >= 0) DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- A table to represent friendships between two users.
 -- The constraint and indexing allows for faster checking.
 CREATE TABLE friendships (
@@ -46,6 +53,11 @@ CREATE TABLE friendships (
 
     user2 INT8 NOT NULL
         REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -80,46 +92,19 @@ CREATE TABLE friend_requests (
 
 CREATE INDEX idx_friend_requests_receiver ON friend_requests(receiver, sender);
 
--- Created Megolm sessions, along with who they're owned
--- by and who they are communicating to
-CREATE TABLE dm_sessions (
-    owner INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    other INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    -- Encrypted under the owner's secret
-    session BYTEA NOT NULL,
-
-    -- Boxed for the other person
-    session_key BYTEA NOT NULL,
-
-    PRIMARY KEY (owner, other)
-);
-
-CREATE INDEX idx_dm_sessions_other_owner ON dm_sessions(other, owner);
-
--- Messages sent through a DM.
--- These are encrypted blobs and the decryption keys
--- are distributed through Olm.
-CREATE TABLE dm_messages (
+-- Messages sent on the platform.
+-- Megolm is used to distribute the decryption keys.
+CREATE TABLE messages (
     id INT8 PRIMARY KEY,
 
-    parent_id INT8 REFERENCES dm_messages(id)
-        ON UPDATE CASCADE
-        ON DELETE SET NULL,
-
-    sender INT8 NOT NULL
-        REFERENCES users(id)
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    receiver INT8 NOT NULL
+    parent_id INT8,
+
+    author INT8 NOT NULL
         REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
@@ -127,12 +112,15 @@ CREATE TABLE dm_messages (
     blob BYTEA NOT NULL,
 
     sent_at TIMESTAMPTZ NOT NULL
-        DEFAULT CURRENT_TIMESTAMP
-);
+        DEFAULT CURRENT_TIMESTAMP,
 
-CREATE INDEX idx_dm_messages_id_sender_receiver ON dm_messages(id, sender, receiver);
-CREATE INDEX idx_dm_messages_id_receiver ON dm_messages(id, receiver);
-CREATE INDEX idx_dm_messages_receiver ON dm_messages(receiver, id);
+    UNIQUE (id, conversation_id),
+
+    FOREIGN KEY (parent_id, conversation_id)
+        REFERENCES messages(id, conversation_id)
+        ON UPDATE CASCADE
+        ON DELETE SET NULL
+);
 
 -- A table containing the message decryption keys
 -- a user has access to
@@ -142,49 +130,21 @@ CREATE TABLE message_decryption_keys (
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    message_id INT8,
+    message_id INT8 REFERENCES messages(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
 
     blob BYTEA NOT NULL,
 
     PRIMARY KEY (user_id, message_id)
 );
 
-CREATE INDEX idx_message_decryption_keys_message_id ON message_decryption_keys(message_id, user_id);
+CREATE INDEX idx_message_decryption_keys_message_user ON message_decryption_keys(message_id, user_id);
 
--- A table of Olm messages containing decryption keys
--- that have not been opened by the other party
-CREATE TABLE pending_dm_message_keys (
-    message_id INT8 REFERENCES dm_messages(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    waiting_on INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    blob BYTEA NOT NULL,
-
-    PRIMARY KEY (message_id, waiting_on)
-);
-
-CREATE INDEX idx_pending_dm_message_keys_waiting_on ON pending_dm_message_keys(waiting_on, message_id);
-
--- Information for a group chat at the database level
-CREATE TABLE groups (
-    id INT8 PRIMARY KEY,
-    name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 30),
-    avatar "AssetID",
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    invite_code TEXT UNIQUE NOT NULL CHECK (invite_code ~ '[0-9A-Z]{8}'),
-    locked BOOLEAN NOT NULL DEFAULT FALSE,
-    epoch INT8 NOT NULL CHECK (epoch >= 0) DEFAULT 0
-);
-
--- All the members in a group chat and when they joined.
-CREATE TABLE group_members (
-    group_id INT8 NOT NULL
-        REFERENCES groups(id)
+-- All the members in a DM or group chat and when they joined.
+CREATE TABLE conversation_members (
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -195,11 +155,30 @@ CREATE TABLE group_members (
 
     joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    PRIMARY KEY (group_id, user_id)
+    PRIMARY KEY (conversation_id, user_id)
 );
 
-CREATE INDEX idx_group_members_user_id ON group_members(user_id, group_id);
-CREATE INDEX idx_group_members_joined_at ON group_members(group_id, joined_at);
+CREATE INDEX idx_conversation_members_user_id ON conversation_members(user_id, conversation_id);
+CREATE INDEX idx_conversation_members_joined_at ON conversation_members(conversation_id, joined_at);
+
+-- Information for a group chat at the database level
+CREATE TABLE groups (
+    id INT8 NOT NULL
+        REFERENCES conversations(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    name TEXT NOT NULL,
+    avatar "AssetID",
+
+    invite_code TEXT UNIQUE NOT NULL
+        CHECK (invite_code ~ '[0-9A-Z]{8}'),
+
+    locked BOOLEAN NOT NULL
+        DEFAULT FALSE,
+
+    PRIMARY KEY (id)
+);
 
 -- Any members that were banned from a group chat.
 CREATE TABLE group_banned_members (
@@ -222,36 +201,10 @@ CREATE TABLE group_banned_members (
 
 CREATE INDEX idx_group_banned_members_member_id ON group_banned_members(member_id, group_id);
 
--- Messages sent within a group.
--- Megolm is used to distribute the decryption keys.
-CREATE TABLE group_messages (
-    id INT8 PRIMARY KEY,
-
-    group_id INT8 NOT NULL
-        REFERENCES groups(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    parent_id INT8
-        REFERENCES group_messages(id)
-        ON UPDATE CASCADE
-        ON DELETE SET NULL,
-
-    author INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    blob BYTEA NOT NULL,
-
-    sent_at TIMESTAMPTZ NOT NULL
-        DEFAULT CURRENT_TIMESTAMP
-);
-
 -- Group session keys and the epochs they are valid for.
-CREATE TABLE group_session_keys (
-    group_id INT8 NOT NULL
-        REFERENCES groups(id)
+CREATE TABLE conversation_session_keys (
+    conversation_id INT8 NOT NULL
+        REFERENCES conversations(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
@@ -260,24 +213,24 @@ CREATE TABLE group_session_keys (
     receiver INT8 NOT NULL,
     blob BYTEA NOT NULL,
 
-    PRIMARY KEY (group_id, epoch, sender, receiver),
+    PRIMARY KEY (conversation_id, epoch, sender, receiver),
 
-    FOREIGN KEY (group_id, sender)
-        REFERENCES group_members(group_id, user_id)
+    FOREIGN KEY (conversation_id, sender)
+        REFERENCES conversation_members(conversation_id, user_id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
-    FOREIGN KEY (group_id, receiver)
-        REFERENCES group_members(group_id, user_id)
+    FOREIGN KEY (conversation_id, receiver)
+        REFERENCES conversation_members(conversation_id, user_id)
         ON UPDATE CASCADE
         ON DELETE CASCADE
 );
 
 -- A table of Megolm messages containing message
 -- decryption keys that still need to be handled.
-CREATE TABLE pending_group_message_keys (
+CREATE TABLE pending_message_keys (
     message_id INT8 NOT NULL
-        REFERENCES group_messages(id)
+        REFERENCES messages(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 

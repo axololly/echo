@@ -18,12 +18,3 @@ pub struct Message {
 pub struct MessageBody {
     pub content: String
 }
-
-/// Temporal parameters for fetching messages.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub enum MessageHistoryParams {
-    Before(DateTime<Utc>),
-    After(DateTime<Utc>),
-    Between(DateTime<Utc>, DateTime<Utc>),
-    Latest
-}

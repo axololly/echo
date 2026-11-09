@@ -1,15 +1,13 @@
-use std::{collections::{HashMap, HashSet}, sync::LazyLock};
+use std::sync::LazyLock;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{__convert_encrypted_to_crypto_box, AssetID, BannedMember, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Group, GroupInvite, GroupMember, Message, MessageBody, MessageHistoryParams, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use echo_types::{AssetID, BannedMember, Group, GroupInvite, GroupMember, SNOWFLAKE_GEN, SnowflakeID};
 use regex::Regex;
-use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
+use rootcause::{bail, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
-use sqlx::QueryBuilder;
 use thiserror::Error;
-use vodozemac::{megolm::{GroupSessionPickle, MegolmMessage, SessionKey}};
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
 
 /// An error related to groups.
 #[derive(Clone, Debug, Deserialize, Error, Serialize)]
@@ -80,8 +78,12 @@ async fn get_group_members(
     group_id: SnowflakeID
 ) -> RouteResult<Vec<SnowflakeID>> {
     let stmt = "
-        SELECT user_id FROM group_members
-        WHERE group_id = $1
+        SELECT user_id FROM conversation_members
+        WHERE conversation_id = $1
+        AND EXISTS (
+            SELECT 1 FROM groups
+            WHERE id = $1
+        )
     ";
 
     let member_ids = fetch_all_scalar!(
@@ -91,20 +93,6 @@ async fn get_group_members(
     );
 
     Ok(member_ids)
-}
-
-/// Dispatch the same [`Event`] to all current
-/// members of a group chat.
-async fn dispatch_event_for_group(
-    ctx: &mut EchoContext,
-    group_id: SnowflakeID,
-    event: Event
-) -> RouteResult<()> {
-    let members = get_group_members(ctx, group_id).await?;
-
-    ctx.dispatcher.dispatch(members, event).await;
-
-    Ok(())
 }
 
 /// Data necessary for creating a new group.
@@ -172,6 +160,12 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &mut *tx,
+        "INSERT INTO conversations (id) VALUES ($1)",
+        group_id
+    );
+
+    execute!(
+        &mut *tx,
         "INSERT INTO groups (id, name, avatar, invite_code) VALUES ($1, $2, $3, $4)",
         group_id,
         &group_name,
@@ -183,7 +177,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
+        "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
         group_id,
         owner,
         now
@@ -201,7 +195,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
         execute!(
             &mut *tx,
-            "INSERT INTO group_members (group_id, user_id, joined_at) VALUES ($1, $2, $3)",
+            "INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3)",
             group_id,
             member_id,
             joined_at
@@ -247,7 +241,7 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let members = fetch_all_as!(
         &ctx.pool,
-        "SELECT user_id, joined_at FROM group_members WHERE group_id = $1",
+        "SELECT user_id, joined_at FROM conversation_members WHERE conversation_id = $1",
         group_id
     );
 
@@ -272,8 +266,8 @@ async fn get_group_owner(
 ) -> RouteResult<SnowflakeID>
 {
     let stmt = "
-        SELECT user_id FROM group_members
-        WHERE group_id = $1
+        SELECT user_id FROM conversation_members
+        WHERE conversation_id = $1
         ORDER BY joined_at ASC
         LIMIT 1
     ";
@@ -341,7 +335,7 @@ pub async fn update_group_appearance(ctx: &mut EchoContext) -> RouteResult<()> {
         (None, None) => bail!(E::InvalidData)
     };
 
-    dispatch_event_for_group(
+    dispatch_event_for_conversation(
         ctx,
         group_id,
         Event::GroupAppearanceUpdated {
@@ -362,9 +356,12 @@ async fn is_group_member(
     let user_id = ctx.user.unwrap();
 
     let stmt = "
-        SELECT 1 FROM group_members
-        WHERE group_id = $1
+        SELECT 1 FROM conversation_members
+        WHERE conversation_id = $1
         AND user_id = $2
+        AND EXISTS (
+            SELECT 1 FROM groups WHERE id = $1
+        )
     ";
 
     let is_member = exists!(
@@ -424,7 +421,7 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let member_count: i64 = fetch_one_scalar!(
         &ctx.pool,
-        "SELECT COUNT(user_id) FROM group_members WHERE group_id = $1",
+        "SELECT COUNT(user_id) FROM conversation_members WHERE group_id = $1",
         group_id
     );
 
@@ -440,14 +437,14 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     execute!(
         &mut *tx,
-        "INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)",
+        "INSERT INTO conversation_members (group_id, user_id) VALUES ($1, $2)",
         group_id,
         user_id
     );
 
     execute!(
         &mut *tx,
-        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        "UPDATE conversations SET epoch = epoch + 1 WHERE id = $1",
         group_id
     );
 
@@ -455,7 +452,7 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let members_data: Vec<(SnowflakeID, DateTime<Utc>)> = fetch_all_as!(
         &ctx.pool,
-        "SELECT user_id, joined_at FROM group_members WHERE group_id = $1",
+        "SELECT user_id, joined_at FROM conversation_members WHERE group_id = $1",
         group_id
     );
 
@@ -474,7 +471,7 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         locked: false
     };
 
-    dispatch_event_for_group(ctx, group_id, Event::MemberJoinedGroup {
+    dispatch_event_for_conversation(ctx, group_id, Event::MemberJoinedGroup {
         group_id,
         member_id: user_id
     }).await?;
@@ -499,8 +496,8 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         .context(E::Database)?;
 
     let stmt = "
-        DELETE FROM group_members
-        WHERE group_id = $1
+        DELETE FROM conversation_members
+        WHERE conversation_id = $1
         AND user_id = $2
     ";
 
@@ -516,7 +513,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
     if members.is_empty() {
         execute!(
             &mut *tx,
-            "DELETE FROM groups WHERE id = $1",
+            "DELETE FROM conversations WHERE id = $1",
             group_id
         );
     }
@@ -532,7 +529,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        "UPDATE conversations SET epoch = epoch + 1 WHERE id = $1",
         group_id
     );
 
@@ -577,8 +574,8 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         .context(E::Database)?;
 
     let stmt = "
-        DELETE FROM group_members
-        WHERE group_id = $1
+        DELETE FROM conversation_members
+        WHERE conversation_id = $1
         AND user_id = $2
     ";
 
@@ -591,11 +588,11 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
 
     execute!(
         &mut *tx,
-        "UPDATE groups SET epoch = epoch + 1 WHERE id = $1",
+        "UPDATE conversations SET epoch = epoch + 1 WHERE id = $1",
         group_id
     );
 
-    dispatch_event_for_group(ctx, group_id, Event::MemberLeftGroup {
+    dispatch_event_for_conversation(ctx, group_id, Event::MemberLeftGroup {
         group_id,
         member_id
     }).await?;
@@ -641,8 +638,8 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         .context(E::Database)?;
 
     let stmt = "
-        DELETE FROM group_members
-        WHERE group_id = $1
+        DELETE FROM conversation_members
+        WHERE conversation_id = $1
         AND user_id = $2
     ";
 
@@ -677,7 +674,7 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
 
     tx.commit().await.context(E::Database)?;
 
-    dispatch_event_for_group(ctx, group_id, Event::MemberLeftGroup {
+    dispatch_event_for_conversation(ctx, group_id, Event::MemberLeftGroup {
         group_id,
         member_id
     }).await?;
@@ -775,7 +772,7 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Grou
         new_invite
     );
 
-    dispatch_event_for_group(
+    dispatch_event_for_conversation(
         ctx,
         group_id,
         Event::GroupInviteRotated {
@@ -802,7 +799,7 @@ pub async fn lock_group(ctx: &mut EchoContext) -> RouteResult<()> {
     );
 
     if result.rows_affected() > 0 {
-        dispatch_event_for_group(ctx, group_id, Event::GroupLockStatusUpdated {
+        dispatch_event_for_conversation(ctx, group_id, Event::GroupLockStatusUpdated {
             group_id,
             locked: true
         }).await?;
@@ -826,440 +823,11 @@ pub async fn unlock_group(ctx: &mut EchoContext) -> RouteResult<()> {
     );
 
     if result.rows_affected() > 0 {
-        dispatch_event_for_group(ctx, group_id, Event::GroupLockStatusUpdated {
+        dispatch_event_for_conversation(ctx, group_id, Event::GroupLockStatusUpdated {
             group_id,
             locked: false
         }).await?;
     }
 
     Ok(())
-}
-
-/// A single group chat member's session,
-/// packaging their outbound session and
-/// the inbound sessions of all other members.
-#[derive(Deserialize, Serialize)]
-pub struct GroupChatSession {
-    pub outbound: Encrypted<GroupSessionPickle>,
-    pub inbounds: HashMap<SnowflakeID, CryptoBox<SessionKey>>
-}
-
-#[route("groups.sessions.get")]
-pub async fn get_latest_group_chat_session(ctx: &mut EchoContext) -> RouteResult<GroupChatSession> {
-    let group_id: SnowflakeID = ctx.stream.receive().await?;
-
-    if !is_group_member(ctx, group_id).await? {
-        bail!(E::Group(G::GroupNotFound));
-    }
-
-    let user_id = ctx.user.unwrap();
-
-    let stmt = "
-        SELECT
-            gsk.receiver,
-            gsk.blob
-        FROM group_session_keys gsk
-        INNER JOIN groups g
-            ON g.id = gsk.group_id
-            AND g.epoch = gsk.epoch
-        WHERE g.id = $1
-        AND gsk.sender = $2
-    ";
-
-    let rows: Vec<(SnowflakeID, Encrypted<GroupSessionPickle>)> = fetch_all_as!(
-        &ctx.pool,
-        stmt,
-        group_id,
-        user_id
-    );
-
-    let mut outbound = None;
-
-    let mut inbounds = HashMap::new();
-
-    let mut members = get_group_members(ctx, group_id)
-        .await?
-        .into_iter()
-        .collect::<HashSet<_>>();
-
-    for (receiver, enc) in rows {
-        if !members.remove(&receiver) {
-            continue;
-        }
-
-        if receiver == user_id {
-            outbound = Some(enc);
-        }
-        else {
-            let key = __convert_encrypted_to_crypto_box(enc)
-                .cast::<SessionKey>();
-
-            inbounds.insert(receiver, key);
-        }
-    }
-
-    let err = E::Group(G::NoMegolmSession);
-
-    if !members.is_empty() {
-        bail!(err);
-    }
-
-    let outbound = outbound.context(err)?;
-
-    let session = GroupChatSession {
-        outbound,
-        inbounds
-    };
-
-    Ok(session)
-}
-
-#[route("groups.sessions.ensure")]
-pub async fn ensure_latest_megolm_session(ctx: &mut EchoContext) -> RouteResult<()> {
-    let group_id: SnowflakeID = ctx.stream.receive().await?;
-
-    if !is_group_member(ctx, group_id).await? {
-        bail!(E::Group(G::GroupNotFound));
-    }
-
-    let user_id = ctx.user.unwrap();
-
-    let epoch: i64 = fetch_one_scalar!(
-        &ctx.pool,
-        "SELECT epoch FROM groups WHERE id = $1",
-        group_id
-    );
-
-    let stmt = "
-        SELECT receiver
-        FROM group_session_keys
-        WHERE group_id = $1
-        AND sender = $2
-        AND epoch = $3
-    ";
-
-    let other_members: Vec<SnowflakeID> = fetch_all_scalar!(
-        &ctx.pool,
-        stmt,
-        group_id,
-        user_id,
-        epoch
-    );
-
-    if !other_members.is_empty() {
-        ctx.stream.send(ok!(false)).await?;
-
-        return Ok(());
-    }
-
-    ctx.stream.send(ok!(true)).await?;
-
-    let stmt = "
-        SELECT
-            gm.user_id,
-            upk.box_public_key
-        FROM group_members gm
-        INNER JOIN users_public_keys upk
-            ON upk.user_id = gm.user_id
-        WHERE gm.group_id = $1
-        AND gm.user_id != $2
-    ";
-
-    let raw_other_members: Vec<(SnowflakeID, BoxPublicKey)> = fetch_all_as!(
-        &ctx.pool,
-        stmt,
-        group_id,
-        user_id
-    );
-
-    let mut other_members: HashMap<SnowflakeID, BoxPublicKey> = raw_other_members
-        .into_iter()
-        .collect();
-
-    ctx.stream.send(ok!(other_members)).await?;
-
-    let session: GroupChatSession = ctx.stream.receive().await?;
-
-    other_members.retain(|id, _| !session.inbounds.contains_key(id));
-
-    if !other_members.is_empty() {
-        bail!(E::InvalidData);
-    }
-
-    let mut tx = ctx
-        .pool
-        .begin()
-        .await
-        .context(E::Database)?;
-
-    let stmt = "
-        INSERT INTO group_session_keys (
-            group_id,
-            epoch,
-            sender,
-            receiver,
-            blob
-        ) VALUES ($1, $2, $3, $4, $5)
-    ";
-
-    execute!(
-        &mut *tx,
-        stmt,
-        group_id,
-        epoch,
-        user_id,
-        user_id,
-        session.outbound
-    );
-
-    for (member_id, session_key) in session.inbounds {
-        execute!(
-            &mut *tx,
-            stmt,
-            group_id,
-            epoch,
-            user_id,
-            member_id,
-            session_key
-        );
-    }
-
-    tx.commit().await.context(E::Database)?;
-
-    Ok(())
-}
-
-/// Data necessary for sending a message into a group.
-///
-/// This requires a Megolm session to have been uploaded to the
-/// server prior to accessing this route.
-#[derive(Deserialize, Serialize)]
-pub struct SendGroupMessageData {
-    pub group_id: SnowflakeID,
-    pub replied_to: Option<SnowflakeID>,
-    pub message_body: Encrypted<MessageBody>,
-    pub key_for_author: Encrypted<Secret>,
-    pub key_for_others: MegolmMessage
-}
-
-#[route("groups.messages.send")]
-pub async fn send_group_message(ctx: &mut EchoContext) -> RouteResult<Message> {
-    let author_id = ctx.user.unwrap();
-
-    let SendGroupMessageData {
-        group_id,
-        replied_to,
-        message_body,
-        key_for_author,
-        key_for_others
-    } = ctx.stream.receive_capped(4096).await?;
-
-    if !is_group_member(ctx, group_id).await? {
-        bail!(E::Group(G::GroupNotFound));
-    }
-
-    let epoch: i64 = fetch_one_scalar!(
-        &ctx.pool,
-        "SELECT epoch FROM groups WHERE id = $1",
-        group_id
-    );
-
-    let has_session = exists!(
-        &ctx.pool,
-        "SELECT 1 FROM group_session_keys WHERE group_id = $1 AND epoch = $2 AND sender = $3",
-        group_id,
-        epoch,
-        author_id
-    );
-
-    if !has_session {
-        bail!(E::Group(G::NoMegolmSession));
-    }
-
-    let message_id = SNOWFLAKE_GEN.next();
-
-    let mut tx = ctx
-        .pool
-        .begin()
-        .await
-        .context(E::Database)?;
-
-    let stmt = "
-        INSERT INTO group_messages (
-            id,
-            group_id,
-            parent_id,
-            author,
-            blob
-        ) VALUES ($1, $2, $3, $4, $5)
-    ";
-
-    execute!(
-        &mut *tx,
-        stmt,
-        message_id,
-        group_id,
-        replied_to,
-        author_id,
-        &message_body
-    );
-
-    let stmt = "
-        INSERT INTO message_decryption_keys (
-            message_id,
-            user_id,
-            blob
-        ) VALUES ($1, $2, $3)
-    ";
-
-    execute!(
-        &mut *tx,
-        stmt,
-        message_id,
-        author_id,
-        key_for_author
-    );
-
-    let stmt = "
-        INSERT INTO pending_group_message_keys (
-            message_id,
-            epoch,
-            blob
-        ) VALUES ($1, $2, $3)
-    ";
-
-    execute!(
-        &mut *tx,
-        stmt,
-        message_id,
-        epoch,
-        SqlxMegolmMessage::from(key_for_others)
-    );
-
-    tx.commit().await.context(E::Database)?;
-
-    dispatch_event_for_group(
-        ctx,
-        group_id,
-        Event::NewGroupMessage {
-            group_id,
-            message_id,
-            author_id
-        }
-    ).await?;
-
-    Ok(Message {
-        id: message_id,
-        replied_to,
-        author: author_id,
-        body: message_body,
-        sent_at: Utc::now()
-    })
-}
-
-/// Data related to getting a list of messages from a group.
-///
-/// The limit is capped at 100.
-#[derive(Deserialize, Serialize)]
-pub struct GetGroupMessageHistoryData {
-    pub group_id: SnowflakeID,
-    pub params: MessageHistoryParams,
-    pub limit: u8
-}
-
-type Messages = Vec<(Message, Encrypted<Secret>)>;
-
-#[route("groups.messages.history.get")]
-pub async fn get_group_message_history(ctx: &mut EchoContext) -> RouteResult<Compressed<Messages>> {
-    let user_id = ctx.user.unwrap();
-
-    let GetGroupMessageHistoryData {
-        group_id,
-        params,
-        limit
-    } = ctx.stream.receive().await?;
-
-    if !is_group_member(ctx, group_id).await? {
-        bail!(E::Group(G::GroupNotFound));
-    }
-
-    let base = "
-        SELECT
-            msg.id,
-            msg.parent_id,
-            msg.author,
-            msg.blob,
-            msg.sent_at,
-            mdk.blob
-        FROM group_messages msg
-        INNER JOIN message_decryption_keys mdk
-            ON mdk.message_id = msg.id
-    ";
-
-    let mut builder = QueryBuilder::new(base);
-
-    builder
-        .push("AND mdk.user_id = ")
-        .push_bind(user_id);
-
-    builder
-        .push(" WHERE msg.group_id = ")
-        .push_bind(group_id);
-
-    use MessageHistoryParams as P;
-
-    match params {
-        P::Before(dt) => {
-            builder
-                .push(" AND msg.sent_at <")
-                .push_bind(dt);
-        },
-        P::After(dt) => {
-            builder
-                .push(" AND msg.sent_at >")
-                .push_bind(dt);
-        },
-        P::Between(start, end) => {
-            if start > end {
-                bail!(E::InvalidData);
-            }
-
-            builder
-                .push(" AND msg.sent_at > ")
-                .push_bind(start)
-                .push(" AND msg.sent_at < ")
-                .push_bind(end);
-        },
-        P::Latest => {
-            builder
-                .push(" AND msg.sent_at < ")
-                .push_bind(SnowflakeID::MAX.as_utc_date_time());
-        }
-    }
-
-    builder
-        .push(" ORDER BY msg.sent_at DESC LIMIT ")
-        .push_bind(limit.min(100) as i64);
-
-    let rows = builder
-        .build_query_as()
-        .fetch_all(&ctx.pool)
-        .await
-        .context(E::Database)?;
-
-    let mut messages = vec![];
-
-    for (id, replied_to, author, body, sent_at, secret) in rows {
-        let message = Message {
-            id,
-            replied_to,
-            author,
-            body,
-            sent_at
-        };
-
-        messages.push((message, secret));
-    }
-
-    Ok(messages.compress())
 }

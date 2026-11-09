@@ -83,8 +83,9 @@ pub struct UserPublicKeys {
 /// and when they first became friends.
 #[derive(Clone, Copy, Debug, Deserialize, FromRow, Serialize)]
 pub struct Friend {
-    pub id: SnowflakeID,
-    pub friends_since: DateTime<Utc>
+    pub user_id: SnowflakeID,
+    pub friends_since: DateTime<Utc>,
+    pub conversation_id: SnowflakeID
 }
 
 /// A request to become friends with another user.
