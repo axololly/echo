@@ -69,6 +69,18 @@ pub enum Event {
     MessagePinStatusUpdated {
         message_id: SnowflakeID,
         pinned: bool
+    },
+
+    /// Message was edited
+    MessageEdited {
+        conversation_id: SnowflakeID,
+        message_id: SnowflakeID
+    },
+
+    /// Message was deleted
+    MessageDeleted {
+        conversation_id: SnowflakeID,
+        message_id: SnowflakeID
     }
 }
 

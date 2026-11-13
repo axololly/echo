@@ -94,6 +94,8 @@ impl EchoRouter {
         router.register_route(process_unread_messages);
         router.register_route(update_pin_status_on_message);
         router.register_route(get_message);
+        router.register_route(edit_message);
+        router.register_route(delete_message);
 
         router
     }
