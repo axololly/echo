@@ -9,7 +9,7 @@ use sqlx::{QueryBuilder, prelude::FromRow};
 use thiserror::Error;
 use vodozemac::megolm::{GroupSessionPickle, MegolmMessage, SessionKey};
 
-use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_scalar, ok, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, router::EchoContext};
 
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
 pub enum MessagesRouteError {
@@ -593,15 +593,11 @@ pub async fn update_pin_status_on_message(ctx: &mut EchoContext) -> RouteResult<
         new_pin_status
     } = ctx.stream.receive().await?;
 
-    let maybe_id = fetch_opt_scalar!(
+    let conversation_id = fetch_opt_scalar!(
         &ctx.pool,
         "SELECT conversation_id FROM messages WHERE id = $1",
         message_id
-    );
-
-    let Some(conversation_id) = maybe_id else {
-        bail!(E::Messages(M::MessageNotFound));
-    };
+    ).context(E::Messages(M::MessageNotFound))?;
 
     if !is_part_of_conversation(ctx, conversation_id).await? {
         bail!(E::Messages(M::MessageNotFound));
@@ -644,15 +640,11 @@ pub async fn update_pin_status_on_message(ctx: &mut EchoContext) -> RouteResult<
 pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
     let message_id: SnowflakeID = ctx.stream.receive().await?;
 
-    let maybe_id = fetch_opt_scalar!(
+    let conversation_id = fetch_opt_scalar!(
         &ctx.pool,
         "SELECT conversation_id FROM messages WHERE id = $1",
         message_id
-    );
-
-    let Some(conversation_id) = maybe_id else {
-        bail!(E::Messages(M::MessageNotFound));
-    };
+    ).context(E::Messages(M::MessageNotFound))?;
 
     if !is_part_of_conversation(ctx, conversation_id).await? {
         bail!(E::Messages(M::MessageNotFound));
@@ -665,4 +657,83 @@ pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
     );
 
     Ok(message)
+}
+
+/// Data relating to editing a message.
+#[derive(Deserialize, Serialize)]
+pub struct EditMessageData {
+    pub message_id: SnowflakeID,
+    pub new_body: Encrypted<MessageBody>
+}
+
+#[route("messages.edit")]
+pub async fn edit_message(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+
+    let EditMessageData {
+        message_id,
+        new_body
+    } = ctx.stream.receive_capped(4096).await?;
+
+    let (conversation_id, author) = fetch_opt_as!(
+        &ctx.pool,
+        "SELECT conversation_id, author FROM messages WHERE id = $1",
+        message_id
+    ).context(E::Messages(M::MessageNotFound))?;
+
+    if user != author {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    execute!(
+        &ctx.pool,
+        "UPDATE messages SET blob = $2 WHERE id = $1",
+        message_id,
+        new_body
+    );
+
+    dispatch_event_for_conversation(
+        ctx,
+        conversation_id,
+        Event::MessageEdited {
+            conversation_id,
+            message_id
+        }
+    ).await?;
+
+    Ok(())
+}
+
+#[route("messages.delete")]
+pub async fn delete_message(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user = ctx.user.unwrap();
+
+    let message_id: SnowflakeID = ctx.stream.receive().await?;
+
+    let (conversation_id, author) = fetch_opt_as!(
+        &ctx.pool,
+        "SELECT conversation_id, author FROM messages WHERE id = $1",
+        message_id
+    ).context(E::Messages(M::MessageNotFound))?;
+
+    if user != author {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    execute!(
+        &ctx.pool,
+        "DELETE FROM messages WHERE id = $1",
+        message_id
+    );
+
+    dispatch_event_for_conversation(
+        ctx,
+        conversation_id,
+        Event::MessageDeleted {
+            conversation_id,
+            message_id
+        }
+    ).await?;
+
+    Ok(())
 }

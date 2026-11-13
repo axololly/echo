@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EditMessageData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
 use echo_types::{BoxPublicKey, Compressed, CryptoBox, Encrypted, Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
@@ -206,7 +206,7 @@ async fn send_message(
     user_conn: &quinn::Connection,
     conversation_id: SnowflakeID,
     message: &str
-) -> Result<Message> {
+) -> Result<(Message, Secret)> {
     let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
 
     let message_secret = Secret::random();
@@ -268,7 +268,7 @@ async fn send_message(
         Ok(msg)
     }).await?;
 
-    Ok(message)
+    Ok((message, message_secret))
 }
 
 async fn process_messages(
@@ -348,6 +348,19 @@ async fn fetch_message_history(
     }).await
 }
 
+async fn fetch_message(
+    user_conn: &quinn::Connection,
+    message_id: SnowflakeID
+) -> Result<Message> {
+    access_route(user_conn, "messages.get", async |stream| {
+        stream.send(&message_id).await?;
+
+        let msg = stream.receive::<RouteResult<Message>>().await??;
+
+        Ok(msg)
+    }).await
+}
+
 async fn update_message_pin(
     user_conn: &quinn::Connection,
     message_id: SnowflakeID,
@@ -418,76 +431,48 @@ async fn main() -> Result<()> {
         (&bob_conn, &bob)
     ).await?;
 
-    let mut msg = send_message(
+    let (msg, msg_secret) = send_message(
         &alice,
         &alice_conn,
         alice_bob_conv_id,
         "hello bob"
     ).await?;
 
-    update_message_pin(
-        &alice_conn,
-        msg.id,
-        true
-    ).await?;
+    access_route(&alice_conn, "messages.edit", async |stream| {
+        stream.send(&EditMessageData {
+            message_id: msg.id,
+            new_body: msg_secret.encrypt(&MessageBody {
+                content: "hello bob (edited)".to_string()
+            })
+        }).await?;
 
-    process_messages(&bob, &bob_conn).await?;
+        stream.receive::<RouteResult<()>>().await??;
 
-    let messages = fetch_message_history(
-        &bob,
-        &bob_conn,
-        alice_bob_conv_id,
-        MessageHistoryParams::Latest
-    ).await?;
+        Ok(())
+    }).await?;
 
-    assert!(
-        messages[0].0.pinned,
-        "alice's pin was not shown on bob's end"
+    let new_msg = fetch_message(&bob_conn, msg.id).await?;
+
+    let new_body = msg_secret.decrypt(&new_msg.body)?;
+
+    assert_eq!(
+        new_body.content, "hello bob (edited)",
+        "new body content was not as expected"
     );
 
-    update_message_pin(
-        &alice_conn,
-        msg.id,
-        false
-    ).await?;
+    access_route(&alice_conn, "messages.delete", async |stream| {
+        stream.send(&msg.id).await?;
 
-    let messages = fetch_message_history(
-        &bob,
-        &bob_conn,
-        alice_bob_conv_id,
-        MessageHistoryParams::Latest
-    ).await?;
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    let fetch_result = fetch_message(&alice_conn, msg.id).await;
 
     assert!(
-        !messages[0].0.pinned,
-        "alice's unpin was not shown on bob's end"
-    );
-
-    for i in 0..500 {
-        println!("[NOTICE] pinning message #{}", i + 1);
-
-        let msg = send_message(
-            &alice,
-            &alice_conn,
-            alice_bob_conv_id,
-            "hello"
-        ).await?;
-
-        update_message_pin(&alice_conn, msg.id, true).await?;
-    }
-
-    let msg = send_message(
-        &alice,
-        &alice_conn,
-        alice_bob_conv_id,
-        "hello"
-    ).await?;
-
-    let result = update_message_pin(&bob_conn, msg.id, true).await;
-
-    assert!(
-        result.is_err(),
-        "alice and bob was able to pin more than 500 messages in their chat"
+        fetch_result.is_err(),
+        "alice was able to fetch a deleted message"
     );
 
     println!("assertions passed!");
