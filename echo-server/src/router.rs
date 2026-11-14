@@ -86,6 +86,9 @@ impl EchoRouter {
         router.register_route(get_banned_members_list);
         router.register_route(rotate_group_invite_code);
         router.register_route(change_group_lock);
+        router.register_route(create_new_group_emoji);
+        router.register_route(get_all_group_emoji_ids);
+        router.register_route(delete_group_emoji);
 
         // Message routes
         router.register_route(get_latest_conversation_session);
@@ -95,6 +98,9 @@ impl EchoRouter {
         router.register_route(process_unread_messages);
         router.register_route(update_pin_status_on_message);
         router.register_route(get_message);
+        router.register_route(add_new_reaction);
+        router.register_route(get_message_reactions);
+        router.register_route(remove_reaction);
 
         // Asset route
         router.register_route(fetch_asset);

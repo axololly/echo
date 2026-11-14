@@ -4,6 +4,9 @@ pub use asset::*;
 mod compressed;
 pub use compressed::*;
 
+mod emoji;
+pub use emoji::*;
+
 mod group;
 pub use group::*;
 

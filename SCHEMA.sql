@@ -185,6 +185,24 @@ CREATE TABLE groups (
     PRIMARY KEY (id)
 );
 
+-- Emojis uploaded to a group chat.
+CREATE TABLE group_emojis (
+    id INT8 PRIMARY KEY,
+
+    group_id INT8 NOT NULL
+        REFERENCES groups(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    name TEXT NOT NULL,
+
+    asset_id "AssetID" NOT NULL,
+
+    UNIQUE (group_id, name)
+);
+
+CREATE INDEX idx_group_emojis_group_id_name ON group_emojis(group_id, name);
+
 -- Any members that were banned from a group chat.
 CREATE TABLE group_banned_members (
     group_id INT8 NOT NULL
@@ -257,3 +275,27 @@ CREATE TABLE message_attachments (
 );
 
 CREATE INDEX idx_message_attachments_asset_id ON message_attachments(asset_id, message_id);
+
+CREATE TABLE message_reactions (
+    message_id INT8 NOT NULL,
+    conversation_id INT8 NOT NULL,
+    author INT8 NOT NULL,
+    emoji_id INT8 NOT NULL
+        REFERENCES group_emojis(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    PRIMARY KEY (message_id, author, emoji_id),
+
+    FOREIGN KEY (message_id, conversation_id)
+        REFERENCES messages(id, conversation_id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (conversation_id, author)
+        REFERENCES conversation_members(conversation_id, user_id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE
+);
+
+CREATE INDEX idx_message_reactions_message_id_emoji_id ON message_reactions(message_id, emoji_id);
