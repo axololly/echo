@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, Reaction, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, prelude::FromRow};
@@ -25,7 +25,16 @@ pub enum MessagesRouteError {
     TooManyPinnedMessages,
 
     #[error("asset not found")]
-    AssetNotFound
+    AssetNotFound,
+
+    #[error("emoji not found")]
+    EmojiNotFound,
+
+    #[error("too many emojis")]
+    TooManyEmojis,
+
+    #[error("reaction not found")]
+    ReactionNotFound
 }
 
 use MessagesRouteError as M;
@@ -115,15 +124,11 @@ pub async fn ensure_latest_conversation_session(ctx: &mut EchoContext) -> RouteR
 
     let conversation_id: SnowflakeID = ctx.stream.receive().await?;
 
-    let maybe_epoch: Option<i64> = fetch_opt_scalar!(
+    let epoch: i64 = fetch_opt_scalar!(
         &ctx.pool,
         "SELECT epoch FROM conversations WHERE id = $1",
         conversation_id
-    );
-
-    let Some(epoch) = maybe_epoch else {
-        bail!(E::Messages(M::ConversationNotFound));
-    };
+    ).context(E::Messages(M::ConversationNotFound))?;
 
     let stmt = "
         SELECT receiver
@@ -822,4 +827,173 @@ pub async fn delete_message(ctx: &mut EchoContext) -> RouteResult<()> {
     ).await?;
 
     Ok(())
+}
+
+/// Data related to adding a new reaction to a message.
+///
+/// Adding the same emoji to the same message will
+/// still succeed and be treated as a no-op.
+#[derive(Deserialize, Serialize)]
+pub struct AddNewReactionData {
+    pub message_id: SnowflakeID,
+    pub emoji_id: SnowflakeID
+}
+
+#[route("messages.reactions.add")]
+pub async fn add_new_reaction(ctx: &mut EchoContext) -> RouteResult<()> {
+    let AddNewReactionData {
+        message_id,
+        emoji_id
+    } = ctx.stream.receive().await?;
+
+    let conversation_id = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT conversation_id FROM messages WHERE id = $1",
+        message_id
+    ).context(E::Messages(M::MessageNotFound))?;
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    let emoji_exists = exists!(
+        &ctx.pool,
+        "SELECT 1 FROM group_emojis WHERE id = $1",
+        emoji_id
+    );
+
+    if !emoji_exists {
+        bail!(E::Messages(M::EmojiNotFound));
+    }
+
+    let count: i64 = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT COUNT(DISTINCT emoji_id) FROM message_reactions WHERE message_id = $1",
+        message_id
+    );
+
+    if count >= 100 {
+        bail!(E::Messages(M::TooManyEmojis));
+    }
+
+    let stmt = "
+        INSERT INTO message_reactions (
+            message_id,
+            conversation_id,
+            author,
+            emoji_id
+        ) VALUES ($1, $2, $3, $4)
+        ON CONFLICT DO NOTHING
+    ";
+
+    let author = ctx.user.unwrap();
+
+    execute!(
+        &ctx.pool,
+        stmt,
+        message_id,
+        conversation_id,
+        author,
+        emoji_id
+    );
+
+    dispatch_event_for_conversation(
+        ctx,
+        conversation_id,
+        Event::NewReactionAdded {
+            message_id,
+            author,
+            emoji_id
+        }
+    ).await?;
+
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RemoveReactionData {
+    pub message_id: SnowflakeID,
+    pub emoji_id: SnowflakeID
+}
+
+#[route("messages.reactions.remove")]
+pub async fn remove_reaction(ctx: &mut EchoContext) -> RouteResult<()> {
+    let RemoveReactionData {
+        message_id,
+        emoji_id
+    } = ctx.stream.receive().await?;
+
+    let conversation_id = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT conversation_id FROM messages WHERE id = $1",
+        message_id
+    ).context(E::Messages(M::MessageNotFound))?;
+
+    let stmt = "
+        DELETE FROM message_reactions
+        WHERE message_id = $1
+        AND author = $2
+        AND emoji_id = $3
+        RETURNING 1
+    ";
+
+    let author = ctx.user.unwrap();
+
+    let reaction_removed = exists!(
+        &ctx.pool,
+        stmt,
+        message_id,
+        author,
+        emoji_id
+    );
+
+    if !reaction_removed {
+        bail!(E::Messages(M::ReactionNotFound));
+    }
+
+    dispatch_event_for_conversation(
+        ctx,
+        conversation_id,
+        Event::ReactionRemoved {
+            message_id,
+            author,
+            emoji_id
+        }
+    ).await?;
+
+    Ok(())
+}
+
+#[route("messages.reactions.get")]
+pub async fn get_message_reactions(ctx: &mut EchoContext) -> RouteResult<Vec<Reaction>> {
+    let message_id: SnowflakeID = ctx.stream.receive().await?;
+
+    let conversation_id = fetch_opt_scalar!(
+        &ctx.pool,
+        "SELECT conversation_id FROM messages WHERE id = $1",
+        message_id
+    ).context(E::Messages(M::MessageNotFound))?;
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    let stmt = "
+        SELECT
+            r.message_id,
+            r.author,
+            e.*
+        FROM message_reactions r
+        INNER JOIN group_emojis e
+            ON r.emoji_id = e.id
+        WHERE r.message_id = $1
+    ";
+
+    let reactions: Vec<Reaction> = fetch_all_as!(
+        &ctx.pool,
+        stmt,
+        message_id
+    );
+
+    Ok(reactions)
 }

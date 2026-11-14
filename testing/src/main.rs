@@ -2,8 +2,8 @@
 
 use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{CreateNewUserData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
-use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Encrypted, Friend, FriendRequest, Message, MessageBody, PasswordProtected, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
+use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -416,23 +416,118 @@ fn save_attachment_to_disk(attachment: &Attachment) -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn fetch_attachment(
+async fn fetch_asset(
     user_conn: &quinn::Connection,
-    asset_id: AssetID,
-    secret: Secret
-) -> Result<Attachment> {
+    asset_id: AssetID
+) -> Result<Vec<u8>> {
     access_route(user_conn, "assets.fetch", async |stream| {
         stream.send(&asset_id).await?;
 
         let maybe_blob: Option<Vec<u8>> = stream.receive::<RouteResult<_>>().await??;
 
-        let blob = maybe_blob.expect("failed to fetch asset");
+        let blob = maybe_blob.context("failed to fetch asset")?;
 
-        let enc: Encrypted<Attachment> = bitcode::deserialize(&blob)?;
+        Ok(blob)
+    }).await
+}
 
-        let atch = secret.decrypt(&enc)?;
+async fn fetch_attachment(
+    user_conn: &quinn::Connection,
+    asset_id: AssetID,
+    secret: Secret
+) -> Result<Attachment> {
+    let blob = fetch_asset(user_conn, asset_id).await?;
 
-        Ok(atch)
+    let enc: Encrypted<Attachment> = bitcode::deserialize(&blob)?;
+
+    let atch = secret.decrypt(&enc)?;
+
+    Ok(atch)
+}
+
+async fn upload_new_emoji(
+    user_conn: &quinn::Connection,
+    group_id: SnowflakeID,
+    name: &str,
+    emoji_blob: &[u8]
+) -> Result<Emoji> {
+    access_route(user_conn, "groups.emojis.create", async |stream| {
+        stream.send(&CreateNewEmojiData {
+            group_id,
+            name: name.to_string()
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await?;
+
+        stream.send(&emoji_blob).await?;
+
+        let emoji = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(emoji)
+    }).await
+}
+
+async fn delete_emoji(
+    user_conn: &quinn::Connection,
+    group_id: SnowflakeID,
+    emoji_id: SnowflakeID
+) -> Result<()> {
+    access_route(user_conn, "groups.emojis.delete", async |stream| {
+        stream.send(&DeleteGroupEmojiData {
+            group_id,
+            emoji_id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
+async fn add_reaction(
+    user_conn: &quinn::Connection,
+    message_id: SnowflakeID,
+    emoji_id: SnowflakeID
+) -> Result<()> {
+    access_route(user_conn, "messages.reactions.add", async |stream| {
+        stream.send(&AddNewReactionData {
+            message_id,
+            emoji_id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
+async fn remove_reaction(
+    user_conn: &quinn::Connection,
+    message_id: SnowflakeID,
+    emoji_id: SnowflakeID
+) -> Result<()> {
+    access_route(user_conn, "messages.reactions.remove", async |stream| {
+        stream.send(&RemoveReactionData {
+            message_id,
+            emoji_id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
+async fn get_reactions(
+    user_conn: &quinn::Connection,
+    message_id: SnowflakeID
+) -> Result<Vec<Reaction>> {
+    access_route(user_conn, "messages.reactions.get", async |stream| {
+        stream.send(&message_id).await?;
+
+        let reactions = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(reactions)
     }).await
 }
 
@@ -442,6 +537,8 @@ async fn main() -> Result<()> {
         PgTempDB::builder()
             .with_bin_path("/usr/lib/postgresql/18/bin")
     );
+
+    dbg!(temp.connection_string());
 
     let options = PgConnectOptions::from_str(&temp.connection_uri())?
         .statement_cache_capacity(0);
@@ -491,56 +588,92 @@ async fn main() -> Result<()> {
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
 
-    let alice_bob_conv_id = establish_friendship(
+    establish_friendship(
         (&alice_conn, &alice),
         (&bob_conn, &bob)
     ).await?;
 
     let cat_photo = load_attachment_from_disk("/home/axo/dev/rust/echo-prototypes/cat.jpeg")?;
 
-    // TOOD: make size test a separate case
-    let (msg, msg_secret) = send_message(
-        &alice,
+    let group = access_route(&alice_conn, "groups.create", async |stream| {
+        stream.send(&CreateNewGroupData {
+            name: None,
+            initial_members: vec![bob.id]
+        }).await?;
+
+        let group: Group = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(group)
+    }).await?;
+
+    let emoji = upload_new_emoji(
         &alice_conn,
-        alice_bob_conv_id,
-        "hello bob",
-        vec![cat_photo.clone()]
+        group.id,
+        "cat",
+        &cat_photo.data
     ).await?;
 
-    let _same_msg = fetch_message(&alice_conn, msg.id).await?;
-
-    for asset_id in msg.attachments {
-        let attachment = fetch_attachment(
-            &alice_conn,
-            asset_id,
-            msg_secret
-        ).await?;
-
-        let path = save_attachment_to_disk(&attachment)?;
-
-        open::that(path)?;
-    }
-
-    let too_many_attachments = std::iter::repeat_n(cat_photo, 100)
-        .enumerate()
-        .map(|(idx, a)| Attachment {
-            filename: format!("cat{idx}.jpeg"),
-            data: a.data
-        })
-        .collect();
-
-    let send_result = send_message(
+    let (msg, _) = send_message(
         &alice,
         &alice_conn,
-        alice_bob_conv_id,
-        "hi bob",
-        too_many_attachments
+        group.id,
+        "hello bob",
+        vec![]
+    ).await?;
+
+    add_reaction(
+        &alice_conn,
+        msg.id,
+        emoji.id
+    ).await?;
+
+    let reactions = get_reactions(&alice_conn, msg.id).await?;
+
+    assert_eq!(
+        reactions[0].emoji, emoji,
+        "alice's reaction did not appear in the message's reactions list"
+    );
+
+    remove_reaction(
+        &alice_conn,
+        msg.id,
+        emoji.id
+    ).await?;
+
+    let reactions = get_reactions(&alice_conn, msg.id).await?;
+
+    assert!(
+        reactions.is_empty(),
+        "alice's reaction was not correctly removed"
+    );
+
+    for i in 0..100 {
+        let emoji = upload_new_emoji(
+            &alice_conn,
+            group.id,
+            &format!("cat{i}"),
+            &cat_photo.data
+        ).await?;
+
+        add_reaction(
+            &alice_conn,
+            msg.id,
+            emoji.id
+        ).await?;
+    }
+
+    let limit_result = add_reaction(
+        &alice_conn,
+        msg.id,
+        emoji.id
     ).await;
 
     assert!(
-        send_result.is_err(),
-        "alice was able to send a message with too many attachments"
+        limit_result.is_err(),
+        "alice was able to add more than 100 reactions to her message"
     );
+
+    println!("assertions passed!");
 
     Ok(())
 }

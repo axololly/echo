@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::{Deref, DerefMut}, sync::Arc};
 
-use echo_types::{AssetID, GroupInvite, SnowflakeID};
+use echo_types::{AssetID, Emoji, GroupInvite, SnowflakeID};
 use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
@@ -80,7 +80,27 @@ pub enum Event {
     MessageDeleted {
         conversation_id: SnowflakeID,
         message_id: SnowflakeID
-    }
+    },
+
+    /// Emoji added
+    NewGroupEmoji(Emoji),
+
+    /// Emoji deleted
+    GroupEmojiDeleted(SnowflakeID),
+
+    /// New reaction added
+    NewReactionAdded {
+        message_id: SnowflakeID,
+        author: SnowflakeID,
+        emoji_id: SnowflakeID
+    },
+
+    /// Reaction removed
+    ReactionRemoved {
+        message_id: SnowflakeID,
+        author: SnowflakeID,
+        emoji_id: SnowflakeID
+    },
 }
 
 type Notifier = UnboundedSender<Arc<Event>>;

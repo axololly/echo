@@ -1,13 +1,14 @@
 use std::sync::LazyLock;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{AssetID, BannedMember, Group, GroupInvite, GroupMember, SNOWFLAKE_GEN, SnowflakeID};
+use echo_types::{AssetID, BannedMember, Compressable, Compressed, Emoji, Group, GroupInvite, GroupMember, SNOWFLAKE_GEN, SnowflakeID};
+use file_type::FileType;
 use regex::Regex;
-use rootcause::{bail, prelude::ResultExt};
+use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
 
 /// An error related to groups.
 #[derive(Clone, Debug, Deserialize, Error, Serialize)]
@@ -37,7 +38,16 @@ pub enum GroupRouteError {
     GroupIsFull,
 
     #[error("no megolm session for this epoch")]
-    NoMegolmSession
+    NoMegolmSession,
+
+    #[error("emoji not found")]
+    EmojiNotFound,
+
+    #[error("cannot add more emojis to this group")]
+    TooManyEmojis,
+
+    #[error("unsupported MIME type for emoji: {_0}")]
+    UnsupportedEmojiMimeType(String)
 }
 
 use GroupRouteError as G;
@@ -844,6 +854,193 @@ pub async fn change_group_lock(ctx: &mut EchoContext) -> RouteResult<()> {
             locked: new_lock_status
         }).await?;
     }
+
+    Ok(())
+}
+
+#[route("groups.emojis.get")]
+pub async fn get_group_emoji(ctx: &mut EchoContext) -> RouteResult<Emoji> {
+    let emoji_id: SnowflakeID = ctx.stream.receive().await?;
+
+    fetch_opt_as!(
+        &ctx.pool,
+        "SELECT * FROM group_emojis WHERE id = $1",
+        emoji_id
+    ).context(E::Group(G::EmojiNotFound))
+}
+
+#[route("groups.emojis.all.get")]
+pub async fn get_all_group_emoji_ids(ctx: &mut EchoContext) -> RouteResult<Compressed<Vec<Emoji>>> {
+    let group_id: SnowflakeID = ctx.stream.receive().await?;
+
+    if !is_group_member(ctx, group_id).await? {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let emojis: Vec<Emoji> = fetch_all_as!(
+        &ctx.pool,
+        "SELECT * FROM group_emojis WHERE group_id = $1",
+        group_id
+    );
+
+    Ok(emojis.compress())
+}
+
+/// Data for uploading a new emoji.
+///
+/// The content is uploaded separately,
+/// unencrypted and will be converted to
+/// WebP for efficiency.
+#[derive(Deserialize, Serialize)]
+pub struct CreateNewEmojiData {
+    pub group_id: SnowflakeID,
+    pub name: String
+}
+
+const VALID_EMOJI_MIME_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp"
+];
+
+static VALID_EMOJI_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9_\-.]{1,30}$").expect("failed to compile regex")
+});
+
+#[route("groups.emojis.create")]
+pub async fn create_new_group_emoji(ctx: &mut EchoContext) -> RouteResult<Emoji> {
+    let CreateNewEmojiData {
+        group_id,
+        name
+    } = ctx.stream.receive().await?;
+
+    if !VALID_EMOJI_NAME_REGEX.is_match(&name) {
+        bail!(E::InvalidData);
+    }
+
+    if get_group_owner(ctx, group_id).await? != ctx.user.unwrap() {
+        bail!(E::Group(G::OnlyForOwner));
+    }
+
+    let count: i64 = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT COUNT(*) FROM group_emojis WHERE group_id = $1",
+        group_id
+    );
+
+    // My Design said that I would have 250 static and 250 animated,
+    // but just having a lump sum is easier to implement, so I'll
+    // say it's for added flexibility and easier implementation.
+    if count >= 500 {
+        bail!(E::Group(G::TooManyEmojis));
+    }
+
+    ctx.stream.send(ok!(())).await?;
+
+    // 250KB limit
+    let asset: Vec<u8> = ctx.stream.receive_capped(250_000).await?;
+
+    let mime_type = FileType::from_bytes(&asset).media_types()[0];
+
+    if !VALID_EMOJI_MIME_TYPES.contains(&mime_type) {
+        bail!(E::Group(G::UnsupportedEmojiMimeType(mime_type.to_string())));
+    }
+
+    let emoji_id = SNOWFLAKE_GEN.next();
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    let asset_id = AssetID::from_bytes(&asset);
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO group_emojis (id, group_id, name, asset_id) VALUES ($1, $2, $3, $4)",
+        emoji_id,
+        group_id,
+        &name,
+        asset_id
+    );
+
+    ctx
+        .asset_storage
+        .upload(asset)
+        .await
+        .context(E::Database)
+        .attach("while uploading emoji asset to asset storage")?;
+
+    tx.commit().await.context(E::Database)?;
+
+    let emoji = Emoji {
+        id: emoji_id,
+        group_id,
+        name,
+        asset_id
+    };
+
+    dispatch_event_for_conversation(
+        ctx,
+        group_id,
+        Event::NewGroupEmoji(emoji.clone())
+    ).await?;
+
+    Ok(emoji)
+}
+
+/// Data related to deleting an emoji.
+///
+/// The group ID is specified to make checking ownership easier.
+#[derive(Deserialize, Serialize)]
+pub struct DeleteGroupEmojiData {
+    pub group_id: SnowflakeID,
+    pub emoji_id: SnowflakeID
+}
+
+#[route("groups.emojis.delete")]
+pub async fn delete_group_emoji(ctx: &mut EchoContext) -> RouteResult<()> {
+    let DeleteGroupEmojiData {
+        group_id,
+        emoji_id
+    } = ctx.stream.receive().await?;
+
+    if get_group_owner(ctx, group_id).await? != ctx.user.unwrap() {
+        bail!(E::Group(G::OnlyForOwner));
+    }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    let maybe_asset_id: Option<AssetID> = fetch_opt_scalar!(
+        &mut *tx,
+        "DELETE FROM group_emojis WHERE id = $1 RETURNING asset_id",
+        emoji_id
+    );
+
+    let Some(asset_id) = maybe_asset_id else {
+        bail!(E::Group(G::EmojiNotFound));
+    };
+
+    ctx
+        .asset_storage
+        .delete(asset_id)
+        .await
+        .context(E::Database)
+        .attach("while deleting emoji blob from asset storage")?;
+
+    tx.commit().await.context(E::Database)?;
+
+    dispatch_event_for_conversation(
+        ctx,
+        group_id,
+        Event::GroupEmojiDeleted(emoji_id)
+    ).await?;
 
     Ok(())
 }
