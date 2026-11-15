@@ -1,8 +1,8 @@
-mod asset;
-pub use asset::*;
+mod assets;
+pub use assets::*;
 
-mod conversation;
-pub use conversation::*;
+mod conversations;
+pub use conversations::*;
 
 mod events;
 pub use events::*;

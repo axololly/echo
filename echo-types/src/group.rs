@@ -5,14 +5,15 @@ use rootcause::{bail, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::prelude::FromRow;
 
-use crate::{AssetID, SnowflakeID};
+use crate::{AssetID, ReadWatermark, SnowflakeID};
 
 /// A member of a group chat, packaging
 /// their user ID and when they joined.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize, sqlx::Type)]
 pub struct GroupMember {
     pub user_id: SnowflakeID,
-    pub joined_at: DateTime<Utc>
+    pub joined_at: DateTime<Utc>,
+    pub read_watermark: Option<ReadWatermark>
 }
 
 /// An Echo group chat.
