@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, Reaction, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, prelude::FromRow};
+use sqlx::{QueryBuilder, postgres::types::PgInterval, prelude::FromRow};
 use thiserror::Error;
 use vodozemac::megolm::{GroupSessionPickle, MegolmMessage, SessionKey};
 
@@ -239,7 +239,8 @@ pub struct SendMessageData {
     pub replied_to: Option<SnowflakeID>,
     pub message_body: Encrypted<MessageBody>,
     pub key_for_author: Encrypted<Secret>,
-    pub key_for_others: MegolmMessage
+    pub key_for_others: MegolmMessage,
+    pub delete_after: Option<TimeDelta>
 }
 
 #[route("messages.send")]
@@ -251,18 +252,27 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         replied_to,
         message_body,
         key_for_author,
-        key_for_others
+        key_for_others,
+        delete_after
     } = ctx.stream.receive_capped(4096).await?; // 4KB limit
 
     if !is_part_of_conversation(ctx, conversation_id).await? {
         bail!(E::Messages(M::ConversationNotFound));
     }
 
-    let epoch: i64 = fetch_one_scalar!(
+    let (epoch, default_message_timer_as_iv): (i64, Option<PgInterval>) = fetch_one_as!(
         &ctx.pool,
-        "SELECT epoch FROM conversations WHERE id = $1",
+        "SELECT epoch, message_timer FROM conversations WHERE id = $1",
         conversation_id
     );
+
+    let default_message_timer = default_message_timer_as_iv.map(|iv| {
+        TimeDelta::days(iv.months as i64 * 30)
+        + TimeDelta::days(iv.days as i64)
+        + TimeDelta::microseconds(iv.microseconds)
+    });
+
+    let delete_after = delete_after.or(default_message_timer);
 
     let stmt = "
         SELECT 1 FROM conversation_session_keys
@@ -306,9 +316,12 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
             conversation_id,
             parent_id,
             author,
-            blob
-        ) VALUES ($1, $2, $3, $4, $5)
+            blob,
+            delete_at
+        ) VALUES ($1, $2, $3, $4, $5, $6)
     ";
+
+    let delete_at = delete_after.map(|td| Utc::now() + td);
 
     execute!(
         &mut *tx,
@@ -317,7 +330,8 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         conversation_id,
         replied_to,
         author_id,
-        &message_body
+        &message_body,
+        delete_at
     );
 
     let mut attachment_ids = vec![];
@@ -377,6 +391,10 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
 
     tx.commit().await.context(E::Database)?;
 
+    if delete_after.is_some() {
+        ctx.running_tasks.delete_disappearing_messages.restart();
+    }
+
     dispatch_event_for_conversation(
         ctx,
         conversation_id,
@@ -395,7 +413,8 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         body: message_body,
         sent_at: Utc::now(),
         pinned: false,
-        attachments: attachment_ids
+        attachments: attachment_ids,
+        delete_at
     })
 }
 

@@ -2748,6 +2748,7 @@ name = "testing"
 version = "0.1.0"
 dependencies = [
  "bitcode",
+ "chrono",
  "echo-server",
  "echo-types",
  "open",

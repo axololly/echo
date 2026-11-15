@@ -1,6 +1,9 @@
 mod asset;
 pub use asset::*;
 
+mod conversation;
+pub use conversation::*;
+
 mod events;
 pub use events::*;
 

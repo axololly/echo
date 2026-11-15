@@ -7,7 +7,7 @@ use sqlx::postgres::PgPool;
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{backoffice::{TaskContext, run_all_tasks}, events::EventDispatcher, router::{EchoContext, EchoRouter}, asset_storage::AssetStorage, stream::Stream};
+use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, events::EventDispatcher, router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -59,11 +59,9 @@ pub async fn run(
         asset_dir.as_ref().to_path_buf()
     );
 
-    {
-        let pool = pool.clone();
-
-        run_all_tasks(TaskContext { pool });
-    }
+    let running_tasks = run_all_tasks(TaskContext {
+        pool: pool.clone()
+    });
 
     while let Some(inc) = endpoint.accept().await {
         if endpoint.open_connections() >= max_connections {
@@ -87,7 +85,8 @@ pub async fn run(
             router.clone(),
             pool.clone(),
             event_dispatcher.clone(),
-            asset_storage.clone()
+            asset_storage.clone(),
+            running_tasks.clone()
         ));
     }
 
@@ -103,7 +102,8 @@ async fn handle_incoming_requests(
     router: Arc<EchoRouter>,
     pool: PgPool,
     dispatcher: EventDispatcher,
-    asset_storage: AssetStorage
+    asset_storage: AssetStorage,
+    running_tasks: RunningTasks
 ) -> Result<()> {
     let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
 
@@ -117,6 +117,7 @@ async fn handle_incoming_requests(
             stream,
             dispatcher: dispatcher.clone(),
             asset_storage: asset_storage.clone(),
+            running_tasks: running_tasks.clone(),
             pool: pool.clone(),
             user: { *authenticated_user.lock().await }
         };

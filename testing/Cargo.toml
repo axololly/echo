@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bitcode = { version = "0.6.9", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 echo-server = { path = "../echo-server" }
 echo-types = { path = "../echo-types" }
 open = "5.4.5"

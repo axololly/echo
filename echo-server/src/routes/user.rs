@@ -264,7 +264,7 @@ pub async fn remove_friend(ctx: &mut EchoContext) -> RouteResult<()> {
     ctx.dispatcher.dispatch(
         [target],
         Event::NoLongerFriendsWith(user)
-    ).await;
+    );
 
     Ok(())
 }
@@ -334,10 +334,10 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         receiver
     );
 
-    ctx
-        .dispatcher
-        .dispatch([receiver], Event::NewFriendRequest(sender))
-        .await;
+    ctx.dispatcher.dispatch(
+        [receiver],
+        Event::NewFriendRequest(sender)
+    );
 
     Ok(())
 }
@@ -398,10 +398,10 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<Snowfla
 
     tx.commit().await.context(E::Database)?;
 
-    ctx
-        .dispatcher
-        .dispatch([sender], Event::UserAcceptedFriendRequest(receiver))
-        .await;
+    ctx.dispatcher.dispatch(
+        [sender],
+        Event::UserAcceptedFriendRequest(receiver)
+    );
 
     Ok(conversation_id)
 }

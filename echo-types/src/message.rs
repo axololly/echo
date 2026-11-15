@@ -16,7 +16,8 @@ pub struct Message {
     pub body: Encrypted<MessageBody>,
     pub sent_at: DateTime<Utc>,
     pub pinned: bool,
-    pub attachments: Vec<AssetID>
+    pub attachments: Vec<AssetID>,
+    pub delete_at: Option<DateTime<Utc>>
 }
 
 /// The message's content.

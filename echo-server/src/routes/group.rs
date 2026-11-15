@@ -222,7 +222,7 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     ctx.dispatcher.dispatch_contextual(
         members.iter().map(|m| m.user_id),
         |member_id| Event::MemberJoinedGroup { group_id, member_id }
-    ).await;
+    );
 
     Ok(Group {
         id: group_id,
@@ -561,7 +561,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
                 group_id,
                 member_id: user_id
             }
-        ).await;
+        );
     }
 
     execute!(
