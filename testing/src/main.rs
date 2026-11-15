@@ -1,8 +1,9 @@
 #![allow(unused)]
 
-use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}};
+use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}, time::Duration};
 
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateMessagePinData}, runner::run, stream::Stream};
+use chrono::TimeDelta;
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData}, runner::run, stream::Stream};
 use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
@@ -207,7 +208,8 @@ async fn send_message(
     user_conn: &quinn::Connection,
     conversation_id: SnowflakeID,
     message: &str,
-    attachments: Vec<Attachment>
+    attachments: Vec<Attachment>,
+    delete_after: Option<TimeDelta>
 ) -> Result<(Message, Secret)> {
     let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
 
@@ -267,7 +269,8 @@ async fn send_message(
                 content: message.to_string()
             }),
             key_for_author: user_secret.encrypt(&message_secret),
-            key_for_others: session.encrypt(message_secret)
+            key_for_others: session.encrypt(message_secret),
+            delete_after
         }).await?;
 
         stream.receive::<RouteResult<()>>().await??;
@@ -588,89 +591,49 @@ async fn main() -> Result<()> {
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
 
-    establish_friendship(
+    let alice_bob_conv_id = establish_friendship(
         (&alice_conn, &alice),
         (&bob_conn, &bob)
     ).await?;
 
-    let cat_photo = load_attachment_from_disk("/home/axo/dev/rust/echo-prototypes/cat.jpeg")?;
+    // NOTE: for testing conversation timers, just uncomment the following section
+    // then make delete_after be None and rerun the code.
+    //
+    // access_route(&alice_conn, "conversations.timers.default.update", async |stream| {
+    //     stream.send(&UpdateDefaultMessageTimerData {
+    //         conversation_id: alice_bob_conv_id,
+    //         new_message_timer: Some(TimeDelta::seconds(1))
+    //     }).await?;
 
-    let group = access_route(&alice_conn, "groups.create", async |stream| {
-        stream.send(&CreateNewGroupData {
-            name: None,
-            initial_members: vec![bob.id]
-        }).await?;
+    //     stream.receive::<RouteResult<()>>().await??;
 
-        let group: Group = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(group)
-    }).await?;
-
-    let emoji = upload_new_emoji(
-        &alice_conn,
-        group.id,
-        "cat",
-        &cat_photo.data
-    ).await?;
+    //     Ok(())
+    // }).await?;
 
     let (msg, _) = send_message(
         &alice,
         &alice_conn,
-        group.id,
+        alice_bob_conv_id,
         "hello bob",
-        vec![]
+        vec![],
+        Some(TimeDelta::seconds(1))
     ).await?;
 
-    add_reaction(
+    let _this_works = fetch_message(
         &alice_conn,
-        msg.id,
-        emoji.id
+        msg.id
     ).await?;
 
-    let reactions = get_reactions(&alice_conn, msg.id).await?;
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
-    assert_eq!(
-        reactions[0].emoji, emoji,
-        "alice's reaction did not appear in the message's reactions list"
-    );
-
-    remove_reaction(
+    let fetch_result = fetch_message(
         &alice_conn,
-        msg.id,
-        emoji.id
-    ).await?;
-
-    let reactions = get_reactions(&alice_conn, msg.id).await?;
-
-    assert!(
-        reactions.is_empty(),
-        "alice's reaction was not correctly removed"
-    );
-
-    for i in 0..100 {
-        let emoji = upload_new_emoji(
-            &alice_conn,
-            group.id,
-            &format!("cat{i}"),
-            &cat_photo.data
-        ).await?;
-
-        add_reaction(
-            &alice_conn,
-            msg.id,
-            emoji.id
-        ).await?;
-    }
-
-    let limit_result = add_reaction(
-        &alice_conn,
-        msg.id,
-        emoji.id
+        msg.id
     ).await;
 
     assert!(
-        limit_result.is_err(),
-        "alice was able to add more than 100 reactions to her message"
+        fetch_result.is_err(),
+        "alice was able to fetch a deleted message"
     );
 
     println!("assertions passed!");

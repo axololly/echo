@@ -40,7 +40,8 @@ CREATE TABLE users_public_keys (
 CREATE TABLE conversations (
     id INT8 PRIMARY KEY,
     epoch INT8 NOT NULL CHECK (epoch >= 0) DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    message_timer INTERVAL
 );
 
 -- A table to represent friendships between two users.
@@ -117,6 +118,8 @@ CREATE TABLE messages (
     pinned BOOLEAN NOT NULL
         DEFAULT FALSE,
 
+    delete_at TIMESTAMPTZ,
+
     UNIQUE (id, conversation_id),
 
     FOREIGN KEY (parent_id, conversation_id)
@@ -126,6 +129,8 @@ CREATE TABLE messages (
 );
 
 CREATE INDEX idx_messages_pinned ON messages(conversation_id, pinned, id);
+
+CREATE INDEX idx_messages_delete_at ON messages(delete_at, id);
 
 -- A table containing the message decryption keys
 -- a user has access to

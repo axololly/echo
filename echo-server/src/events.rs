@@ -1,9 +1,12 @@
-use std::{collections::HashMap, ops::{Deref, DerefMut}, sync::Arc};
+use std::{ops::{Deref, DerefMut}, sync::Arc};
 
+use chrono::TimeDelta;
+use dashmap::{DashMap, DashSet};
 use echo_types::{AssetID, Emoji, GroupInvite, SnowflakeID};
+use pubsub_rs::Pubsub;
 use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
+use tokio::sync::{broadcast, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
 
 use crate::{error::RouteResult, fetch_all_scalar, router::EchoContext};
 
@@ -101,6 +104,12 @@ pub enum Event {
         author: SnowflakeID,
         emoji_id: SnowflakeID
     },
+
+    /// Updated conversation timer
+    ConversationTimerUpdated {
+        conversation_id: SnowflakeID,
+        new_message_timer: Option<TimeDelta>
+    }
 }
 
 type Notifier = UnboundedSender<Arc<Event>>;
@@ -129,29 +138,22 @@ impl DerefMut for Notified {
 
 impl Drop for Notified {
     fn drop(&mut self) {
-        let dispatcher = self.dispatcher.clone();
-        let id = self.id;
-
-        tokio::spawn(async move {
-            dispatcher.unregister(id).await;
-        });
+        self.dispatcher.unregister(self.id);
     }
 }
 
 /// An event dispatcher.
 #[derive(Clone, Default)]
 pub struct EventDispatcher {
-    notifiers: Arc<Mutex<HashMap<SnowflakeID, Notifier>>>
+    notifiers: Arc<DashMap<SnowflakeID, Notifier>>
 }
 
 impl EventDispatcher {
     /// Add a new ID to be notified of certain things.
     pub async fn register(&self, id: SnowflakeID) -> Notified {
-        let mut notifiers = self.notifiers.lock().await;
-
         let (sender, receiver) = unbounded_channel();
 
-        notifiers.insert(id, sender);
+        self.notifiers.insert(id, sender);
 
         Notified {
             id,
@@ -162,24 +164,20 @@ impl EventDispatcher {
 
     /// Stop sending events to this ID, returning whether or not
     /// the ID was receiving events originally.
-    pub async fn unregister(&self, id: SnowflakeID) -> bool {
-        let mut notifiers = self.notifiers.lock().await;
-
-        notifiers.remove(&id).is_some()
+    pub fn unregister(&self, id: SnowflakeID) -> bool {
+        self.notifiers.remove(&id).is_some()
     }
 
     /// Dispatch an event to a specific set of listeners.
-    pub async fn dispatch(
+    pub fn dispatch(
         &self,
         to: impl IntoIterator<Item = SnowflakeID>,
         event: Event
     ) {
-        let mut notifiers = self.notifiers.lock().await;
-
         let event = Arc::new(event);
 
         for id in to {
-            let Some(notifier) = notifiers.get(&id) else {
+            let Some(notifier) = self.notifiers.get(&id) else {
                 continue;
             };
 
@@ -188,21 +186,19 @@ impl EventDispatcher {
 
             // No more listeners for this sender, so we can discard it.
             if result.is_err() {
-                notifiers.remove(&id);
+                self.notifiers.remove(&id);
             }
         }
     }
 
     /// Dispatch an [`Event`] that is dependent on a member's ID.
-    pub async fn dispatch_contextual(
+    pub fn dispatch_contextual(
         &self,
         to: impl IntoIterator<Item = SnowflakeID>,
         event_fn: impl Fn(SnowflakeID) -> Event
     ) {
-        let mut notifiers = self.notifiers.lock().await;
-
         for id in to {
-            let Some(notifier) = notifiers.get(&id) else {
+            let Some(notifier) = self.notifiers.get(&id) else {
                 continue;
             };
 
@@ -211,7 +207,7 @@ impl EventDispatcher {
 
             // No more listeners for this sender, so we can discard it.
             if result.is_err() {
-                notifiers.remove(&id);
+                self.notifiers.remove(&id);
             }
         }
     }
@@ -230,7 +226,7 @@ pub async fn dispatch_event_for_conversation(
         conversation_id
     );
 
-    ctx.dispatcher.dispatch(members, event).await;
+    ctx.dispatcher.dispatch(members, event);
 
     Ok(())
 }

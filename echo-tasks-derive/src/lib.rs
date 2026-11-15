@@ -209,7 +209,7 @@ pub fn interval(
                 ::std::time::Duration::new(#secs, #nanos)
             }
 
-            async fn callback(&self) {
+            async fn callback(&self, RUNNING_TASK: ::echo_tasks::task::RunningTask) {
                 let inner = async |#ctx_param| #ret_type {
                     #body
                 };
@@ -223,6 +223,7 @@ pub fn interval(
         }
 
         #[allow(non_camel_case_types)]
+        #[derive(Clone)]
         pub struct #fn_name {
             internal: ::echo_tasks::task::RunningTask
         }
@@ -248,6 +249,25 @@ pub fn interval(
             /// Cancel the internal task.
             pub fn cancel(&self) {
                 self.internal.cancel();
+            }
+
+            /// Restart the internal task by cancelling then restarting.
+            pub fn restart(&self) {
+                self.internal.cancel();
+
+                self.internal.start();
+            }
+
+            /// Restart the internal task, waiting for it to gracefully
+            /// stop before starting the task again.
+            ///
+            /// This will block until the task finishes.
+            pub async fn restart_graceful(&self) {
+                self.internal.stop();
+
+                self.internal.wait_until_stopped().await;
+
+                self.internal.start();
             }
         }
     }.into()

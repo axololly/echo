@@ -1,48 +1,12 @@
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 use echo_tasks::interval;
+use echo_types::SnowflakeID;
 use rootcause::{Result, prelude::ResultExt};
 use sqlx::PgPool;
 
-use crate::execute;
-
-/*
- * Based on the following two queries:
- *
- * SELECT pgmk.message_id
- * FROM pending_group_message_keys pgmk
- * INNER JOIN group_messages msg
- *   ON msg.id = pgmk.message_id
- * WHERE NOT EXISTS (
- *   SELECT 1 FROM group_members gm
- *   WHERE gm.group_id = msg.group_id
- *   AND NOT EXISTS (
- *     SELECT 1 FROM message_decryption_keys mdk
- *     WHERE mdk.message_id = pgmk.message_id
- *     AND mdk.user_id = gm.user_id
- *   )
- * );
- *
- * The innermost NOT EXISTS will abort if a member is missing
- * a decryption key for the central message. That produces a
- * list of users who still need the Megolm message.
- * The outermost NOT EXISTS ensures the list of people needing
- * the Megolm message is empty, therefore meaning the Megolm
- * message is no longer needed, and can be safely recycled.
- *
- * SELECT
- *   gsk.group_id,
- *   gsk.epoch,
- *   gsk.sender,
- *   gsk.receiver
- * FROM group_session_keys gsk
- * INNER JOIN group_messages msg
- *   ON msg.group_id = gsk.group_id
- *   AND msg.author = gsk.sender
- * WHERE NOT EXISTS (
- *   SELECT 1 FROM pending_group_message_keys pgmk
- *   WHERE pgmk.message_id = msg.id
- *   AND pgmk.epoch = gsk.epoch
- * );
-*/
+use crate::{execute, fetch_opt_as};
 
 /// Context for every task to function properly.
 #[derive(Clone)]
@@ -113,7 +77,57 @@ pub async fn remove_unused_session_data(ctx: TaskContext) -> Result<()> {
     Ok(())
 }
 
+#[interval(secs = 1)]
+#[rename(DeleteDisappearingMessages)]
+pub async fn delete_disappearing_messages(ctx: TaskContext) -> Result<()> {
+    let stmt = "
+        SELECT id, delete_at
+        FROM messages
+        ORDER BY delete_at ASC
+        LIMIT 1
+    ";
+
+    let row: Option<(SnowflakeID, DateTime<Utc>)> = fetch_opt_as!(&ctx.pool, stmt);
+
+    let Some((message_id, delete_at)) = row else {
+        RUNNING_TASK.cancel();
+
+        return Ok(());
+    };
+
+    let delta = delete_at - Utc::now();
+
+    let secs = delta.num_seconds().max(0) as u64;
+    let nanos = delta.subsec_nanos().max(0) as u32;
+
+    tokio::time::sleep(Duration::new(secs, nanos)).await;
+
+    execute!(
+        &ctx.pool,
+        "DELETE FROM messages WHERE id = $1",
+        message_id
+    );
+
+    Ok(())
+}
+
+/// All currently running tasks in the application.
+///
+/// This provides an interface to start, stop or restart
+/// the running tasks.
+#[derive(Clone)]
+pub struct RunningTasks {
+    pub remove_unused_session_data: RemoveUnusedSessionData,
+    pub delete_disappearing_messages: DeleteDisappearingMessages
+}
+
 /// Begin running all background tasks in this module.
-pub fn run_all_tasks(ctx: TaskContext) {
-    RemoveUnusedSessionData::start(ctx.clone());
+pub fn run_all_tasks(ctx: TaskContext) -> RunningTasks {
+    let remove_unused_session_data = RemoveUnusedSessionData::start(ctx.clone());
+    let delete_disappearing_messages = DeleteDisappearingMessages::start(ctx.clone());
+
+    RunningTasks {
+        remove_unused_session_data,
+        delete_disappearing_messages
+    }
 }
