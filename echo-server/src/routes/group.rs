@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{AssetID, BannedMember, Compressable, Compressed, Emoji, Group, GroupInvite, GroupMember, SNOWFLAKE_GEN, SnowflakeID};
+use echo_types::{AssetID, BannedMember, Compressable, Compressed, Emoji, Group, GroupInvite, GroupMember, SNOWFLAKE_GEN, SnowflakeID, SqlxReadWatermark};
 use file_type::FileType;
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
@@ -47,7 +47,10 @@ pub enum GroupRouteError {
     TooManyEmojis,
 
     #[error("unsupported MIME type for emoji: {_0}")]
-    UnsupportedEmojiMimeType(String)
+    UnsupportedEmojiMimeType(String),
+
+    #[error("not friends with person trying to add to group")]
+    NotFriends
 }
 
 use GroupRouteError as G;
@@ -197,7 +200,8 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     members.push(GroupMember {
         user_id: owner,
-        joined_at: now
+        joined_at: now,
+        read_watermark: None
     });
 
     for (i, &member_id) in initial_members.iter().enumerate() {
@@ -213,7 +217,8 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
         members.push(GroupMember {
             user_id: member_id,
-            joined_at
+            joined_at,
+            read_watermark: None
         });
     }
 
@@ -246,7 +251,9 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     let stmt = "
         SELECT
             user_id,
-            joined_at
+            joined_at,
+            last_message_id_read,
+            last_message_read_at
         FROM conversation_members
         WHERE conversation_id = $1
     ";
@@ -259,7 +266,14 @@ pub async fn get_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     let members = raw_members
         .into_iter()
-        .map(|(user_id, joined_at)| GroupMember { user_id, joined_at })
+        .map(|(user_id, joined_at, last_id, read_at)| GroupMember {
+            user_id,
+            joined_at,
+            read_watermark: SqlxReadWatermark {
+                last_message_id_read: last_id,
+                last_message_read_at: read_at
+            }.convert()
+        })
         .collect();
 
     let stmt = "
@@ -487,15 +501,29 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
 
     tx.commit().await.context(E::Database)?;
 
-    let members_data: Vec<(SnowflakeID, DateTime<Utc>)> = fetch_all_as!(
+    let stmt = "
+        SELECT
+            user_id,
+            joined_at,
+            last_message_id_read,
+            last_message_read_at
+        FROM conversation_members
+        WHERE conversation_id = $1
+    ";
+
+    let members_data: Vec<(_, _, SqlxReadWatermark)> = fetch_all_as!(
         &ctx.pool,
-        "SELECT user_id, joined_at FROM conversation_members WHERE conversation_id = $1",
+        stmt,
         group_id
     );
 
     let members = members_data
         .into_iter()
-        .map(|(user_id, joined_at)| GroupMember { user_id, joined_at })
+        .map(|(user_id, joined_at, raw)| GroupMember {
+            user_id,
+            joined_at,
+            read_watermark: raw.convert()
+        })
         .collect();
 
     let group = Group {
@@ -514,6 +542,123 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
     }).await?;
 
     Ok(group)
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct AddFriendToGroupData {
+    pub group_id: SnowflakeID,
+    pub friend_id: SnowflakeID
+}
+
+#[route("groups.add")]
+pub async fn add_friend_to_group(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user_id = ctx.user.unwrap();
+
+    let AddFriendToGroupData {
+        group_id,
+        friend_id
+    } = ctx.stream.receive().await?;
+
+    if user_id == friend_id {
+        bail!(E::InvalidData);
+    }
+
+    let stmt = "
+        SELECT 1 FROM friendships WHERE user1 = $1 AND user2 = $2
+        UNION ALL
+        SELECT 1 FROM friendships WHERE user1 = $2 AND user2 = $1
+    ";
+
+    let friends = exists!(
+        &ctx.pool,
+        stmt,
+        user_id,
+        friend_id
+    );
+
+    if !friends {
+        bail!(E::Group(G::NotFriends))
+    }
+
+    if !is_group_member(ctx, group_id).await? {
+        bail!(E::Group(G::GroupNotFound));
+    }
+
+    let stmt = "
+        SELECT 1 FROM conversation_members
+        WHERE conversation_id = $1
+        AND user_id = $2
+        AND EXISTS (
+            SELECT 1 FROM groups WHERE id = $1
+        )
+    ";
+
+    let is_already_member = exists!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        friend_id
+    );
+
+    if is_already_member {
+        return Ok(());
+    }
+
+    let stmt = "
+        SELECT banned_at, reason
+        FROM group_banned_members
+        WHERE group_id = $1
+        AND member_id = $2
+    ";
+
+    let maybe_ban_data = fetch_opt_as!(
+        &ctx.pool,
+        stmt,
+        group_id,
+        friend_id
+    );
+
+    if let Some((when, reason)) = maybe_ban_data {
+        bail!(E::Group(G::MemberIsBanned { when, reason }));
+    }
+
+    let member_count: i64 = fetch_one_scalar!(
+        &ctx.pool,
+        "SELECT COUNT(user_id) FROM conversation_members WHERE conversation_id = $1",
+        group_id
+    );
+
+    if member_count >= 100 {
+        bail!(E::Group(G::GroupIsFull));
+    }
+
+    let mut tx = ctx
+        .pool
+        .begin()
+        .await
+        .context(E::Database)?;
+
+    execute!(
+        &mut *tx,
+        "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($1, $2)",
+        group_id,
+        friend_id
+    );
+
+    execute!(
+        &mut *tx,
+        "UPDATE conversations SET epoch = epoch + 1 WHERE id = $1",
+        group_id
+    );
+
+    tx.commit().await.context(E::Database)?;
+
+    dispatch_event_for_conversation(ctx, group_id, Event::MemberJoinedGroup {
+        group_id,
+        member_id: friend_id
+    }).await?;
+
+    Ok(())
 }
 
 #[route("groups.leave")]

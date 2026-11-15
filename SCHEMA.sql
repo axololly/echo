@@ -165,7 +165,14 @@ CREATE TABLE conversation_members (
 
     joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    PRIMARY KEY (conversation_id, user_id)
+    last_message_id_read INT8,
+    last_message_read_at TIMESTAMPTZ,
+
+    PRIMARY KEY (conversation_id, user_id),
+
+    CONSTRAINT last_message_atomicity CHECK (
+        (last_message_id_read IS NULL) = (last_message_read_at IS NULL)
+    )
 );
 
 CREATE INDEX idx_conversation_members_user_id ON conversation_members(user_id, conversation_id);

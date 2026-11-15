@@ -15,7 +15,6 @@
 ## Server - TODO: Miscellaneous
 
 - [ ] Allow anyone in a group chat to add another user
-- [ ] Notify the sender if the recipient (or which recipients in a group chat) have received their message
 - [ ] Be able to delete accounts on hosts, which will then prevent other users from determining who wrote a message
 
 ## UI

@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}, time::Duration};
 
 use chrono::TimeDelta;
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData}, runner::run, stream::Stream};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData, UpdateReadWatermarkData}, runner::run, stream::Stream};
 use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
@@ -560,6 +560,23 @@ async fn start_typing(
     }).await
 }
 
+async fn update_read_watermark(
+    user_conn: &quinn::Connection,
+    conversation_id: SnowflakeID,
+    message_id: SnowflakeID
+) -> Result<()> {
+    access_route(user_conn, "messages.watermark.update", async |stream| {
+        stream.send(&UpdateReadWatermarkData {
+            conversation_id,
+            message_id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -622,22 +639,46 @@ async fn main() -> Result<()> {
         (&bob_conn, &bob)
     ).await?;
 
-    subscribe_to_typing_events(&alice_conn, alice_bob_conv_id).await?;
-    subscribe_to_typing_events(&bob_conn, alice_bob_conv_id).await?;
+    let (msg, _) = send_message(
+        &alice,
+        &alice_conn,
+        alice_bob_conv_id,
+        "hello",
+        vec![],
+        None
+    ).await?;
 
-    start_typing(&alice_conn, alice_bob_conv_id).await?;
+    let (msg2, _) = send_message(
+        &bob,
+        &bob_conn,
+        alice_bob_conv_id,
+        "hi alice",
+        vec![],
+        None
+    ).await?;
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    update_read_watermark(
+        &alice_conn,
+        alice_bob_conv_id,
+        msg2.id
+    ).await?;
 
-    access_route(&alice_conn, "conversations.typing.unsubscribe", async |stream| {
-        stream.receive::<RouteResult<()>>().await??;
+    update_read_watermark(
+        &alice_conn,
+        alice_bob_conv_id,
+        msg.id
+    ).await?;
 
-        Ok(())
+    let alice_read_watermark = access_route(&bob_conn, "users.friends.get", async |stream| {
+        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(friends[0].read_watermark.unwrap())
     }).await?;
 
-    start_typing(&bob_conn, alice_bob_conv_id).await?;
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        alice_read_watermark.message_id, msg2.id,
+        "alice's last viewed message ID was not as expected"
+    );
 
     println!("assertions passed!");
 

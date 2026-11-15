@@ -20,6 +20,10 @@ impl SnowflakeID {
         id: i64::MAX
     };
 
+    pub const MIN: Self = Self {
+        id: 0
+    };
+
     /// Make a snowflake ID from raw components.
     pub const fn from_components(
         timestamp: i64,

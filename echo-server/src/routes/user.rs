@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, User, UserPublicKeys, UserState};
+use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserPublicKeys, UserState};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
@@ -208,18 +208,53 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 #[route("users.friends.get")]
 pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Vec<Friend>> {
     let stmt = r#"
-        SELECT user1 AS "user_id", friends_since, conversation_id FROM friendships WHERE user2 = $1
+        SELECT
+            f.user1 AS "user_id",
+            f.friends_since,
+            f.conversation_id,
+            cm.last_message_id_read,
+            cm.last_message_read_at
+        FROM friendships f
+        INNER JOIN conversation_members cm
+            ON cm.conversation_id = f.conversation_id
+            AND cm.user_id = f.user1
+        WHERE f.user2 = $1
+
         UNION ALL
-        SELECT user2 AS "user_id", friends_since, conversation_id FROM friendships WHERE user1 = $1
+
+        SELECT
+            f.user2 AS "user_id",
+            f.friends_since,
+            f.conversation_id,
+            cm.last_message_id_read,
+            cm.last_message_read_at
+        FROM friendships f
+        INNER JOIN conversation_members cm
+            ON cm.conversation_id = f.conversation_id
+            AND cm.user_id = f.user2
+        WHERE f.user1 = $1
     "#;
 
     let user_id = ctx.user.unwrap();
 
-    let friends: Vec<Friend> = fetch_all_as!(
+    let raw_friends: Vec<_> = fetch_all_as!(
         &ctx.pool,
         stmt,
         user_id
     );
+
+    let friends = raw_friends
+        .into_iter()
+        .map(|(user_id, friends_since, conversation_id, last_id, read_at)| Friend {
+            user_id,
+            friends_since,
+            conversation_id,
+            read_watermark: SqlxReadWatermark {
+                last_message_id_read: last_id,
+                last_message_read_at: read_at
+            }.convert()
+        })
+        .collect();
 
     Ok(friends)
 }

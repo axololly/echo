@@ -115,6 +115,13 @@ pub enum Event {
     UserStartedTyping {
         conversation_id: SnowflakeID,
         user_id: SnowflakeID
+    },
+
+    /// User has read this message and all before
+    UserUpdatedReadWatermark {
+        conversation_id: SnowflakeID,
+        user_id: SnowflakeID,
+        new_last_message_id_read: SnowflakeID
     }
 }
 

@@ -103,6 +103,7 @@ impl EchoRouter {
         router.register_route(add_new_reaction);
         router.register_route(get_message_reactions);
         router.register_route(remove_reaction);
+        router.register_route(update_read_watermark);
 
         // Conversation routes
         router.register_route(get_default_message_timer);

@@ -78,13 +78,45 @@ pub struct UserPublicKeys {
     pub box_public_key: BoxPublicKey
 }
 
+/// Read watermark for a conversation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize, sqlx::Type)]
+pub struct ReadWatermark {
+    pub message_id: SnowflakeID,
+    pub read_at: DateTime<Utc>
+}
+
+/// A `sqlx`-compliant version of [`ReadWatermark`].
+///
+/// `sqlx` does not support flattening an `Option<T>`,
+/// so this type must be used to retrieve the data,
+/// then it can be converted using the `convert()` method.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize, sqlx::Type)]
+pub struct SqlxReadWatermark {
+    pub last_message_id_read: Option<SnowflakeID>,
+    pub last_message_read_at: Option<DateTime<Utc>>
+}
+
+impl SqlxReadWatermark {
+    pub fn convert(self) -> Option<ReadWatermark> {
+        let Self { last_message_id_read, last_message_read_at } = self;
+
+        if let (Some(message_id), Some(read_at)) = (last_message_id_read, last_message_read_at) {
+            Some(ReadWatermark { message_id, read_at })
+        }
+        else {
+            None
+        }
+    }
+}
+
 /// A user's friend, containing the friend's user ID
 /// and when they first became friends.
 #[derive(Clone, Copy, Debug, Deserialize, FromRow, Serialize)]
 pub struct Friend {
     pub user_id: SnowflakeID,
     pub friends_since: DateTime<Utc>,
-    pub conversation_id: SnowflakeID
+    pub conversation_id: SnowflakeID,
+    pub read_watermark: Option<ReadWatermark>
 }
 
 /// A request to become friends with another user.

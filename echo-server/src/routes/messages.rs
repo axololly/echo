@@ -1016,3 +1016,67 @@ pub async fn get_message_reactions(ctx: &mut EchoContext) -> RouteResult<Vec<Rea
 
     Ok(reactions)
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct UpdateReadWatermarkData {
+    pub conversation_id: SnowflakeID,
+    pub message_id: SnowflakeID
+}
+
+#[route("messages.watermark.update")]
+pub async fn update_read_watermark(ctx: &mut EchoContext) -> RouteResult<()> {
+    let UpdateReadWatermarkData {
+        conversation_id,
+        message_id
+    } = ctx.stream.receive().await?;
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Messages(M::ConversationNotFound));
+    }
+
+    let message_exists = exists!(
+        &ctx.pool,
+        "SELECT 1 FROM messages WHERE id = $1",
+        message_id
+    );
+
+    if !message_exists {
+        bail!(E::Messages(M::MessageNotFound));
+    }
+
+    let stmt = "
+        UPDATE conversation_members
+        SET
+            last_message_id_read = $3,
+            last_message_read_at = CURRENT_TIMESTAMP
+        WHERE conversation_id = $1
+        AND user_id = $2
+        AND (
+            last_message_id_read IS NULL
+            OR last_message_id_read < $3
+        )
+        RETURNING 1
+    ";
+
+    let update_was_made = exists!(
+        &ctx.pool,
+        stmt,
+        conversation_id,
+        ctx.user.unwrap(),
+        message_id
+    );
+
+    if update_was_made {
+        dispatch_event_for_conversation(
+            ctx,
+            conversation_id,
+            Event::UserUpdatedReadWatermark {
+                conversation_id,
+                user_id: ctx.user.unwrap(),
+                new_last_message_id_read: message_id
+            }
+        ).await?;
+    }
+
+    Ok(())
+}
