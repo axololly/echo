@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Decode, Encode, postgres::PgTypeInfo, prelude::FromRow};
+use structdiff::{Difference, StructDiff};
 
 use crate::{AssetID, BoxPublicKey, Encrypted, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
 
@@ -56,7 +57,7 @@ pub struct UserState {
 /// An Echo user.
 ///
 /// Their public key information can be found in [`UserPublicKeys`].
-#[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Difference, Eq, FromRow, PartialEq, Serialize)]
 pub struct User {
     pub id: SnowflakeID,
     pub name: String,
@@ -70,6 +71,8 @@ pub struct User {
     #[sqlx(rename = "encrypted_state")]
     pub state: Encrypted<UserState>
 }
+
+pub type UserDiff = <User as StructDiff>::Diff;
 
 /// A user's public key information.
 #[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]

@@ -1,12 +1,14 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserPublicKeys, UserState};
+use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserDiff, UserPublicKeys, UserState};
+use p256::{ecdsa::SigningKey, elliptic_curve::Generate};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
+use structdiff::StructDiff;
 use thiserror::Error;
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_as, fetch_one_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
 
 /// An error related to users.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -203,6 +205,185 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     tx.commit().await.context(E::Database)?;
 
     Ok(user)
+}
+
+pub static VALID_DISPLAY_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^[^\p{Cc}]{1,30}$"#)
+        .expect("failed to compile display name regex")
+});
+
+#[route("users.update")]
+pub async fn update_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
+    let diffs: Vec<UserDiff> = ctx.stream.receive().await?;
+
+    if diffs.is_empty() {
+        return Ok(());
+    }
+
+    let old: User = fetch_one_as!(
+        &ctx.pool,
+        "SELECT * FROM users WHERE id = $1",
+        ctx.user.unwrap()
+    );
+
+    let new = old.apply_ref(diffs);
+
+    if new.name != old.name {
+        if !VALID_USERNAME_REGEX.is_match(&new.name) {
+            bail!(E::InvalidData);
+        }
+
+        let username_taken = exists!(
+            &ctx.pool,
+            "SELECT 1 FROM users WHERE name = $1",
+            &new.name
+        );
+
+        if username_taken {
+            bail!(E::User(U::UsernameAlreadyTaken));
+        }
+    }
+
+    if new.id != old.id {
+        bail!(E::InvalidData);
+    }
+
+    if !VALID_DISPLAY_NAME_REGEX.is_match(&new.display_name) {
+        bail!(E::InvalidData);
+    }
+
+    if new.status.chars().count() >= 200 {
+        bail!(E::InvalidData);
+    }
+
+    if new.about_me.chars().count() >= 2000 {
+        bail!(E::InvalidData);
+    }
+
+    let stmt = "
+        UPDATE users
+        SET
+            name = $2,
+            display_name = $3,
+            avatar = $4,
+            activity = $5,
+            about_me = $6,
+            status = $7,
+            encrypted_secret = $8,
+            encrypted_state = $9
+        WHERE id = $1
+    ";
+
+    execute!(
+        &ctx.pool,
+        stmt,
+        &new.id,
+        &new.name,
+        &new.display_name,
+        &new.avatar,
+        &new.activity,
+        &new.about_me,
+        &new.status,
+        &new.secret,
+        &new.state
+    );
+
+    ctx.profile_update_pubsub.publish(ctx.user.unwrap());
+
+    Ok(())
+}
+
+#[route("users.updates.subscribe")]
+pub async fn subscribe_to_profile_updates(ctx: &mut EchoContext) -> RouteResult<()> {
+    let interested_in: Vec<SnowflakeID> = ctx.stream.receive().await?;
+
+    for id in interested_in {
+        ctx.profile_update_pubsub.subscribe(ctx.user.unwrap(), id);
+    }
+
+    Ok(())
+}
+
+#[route("users.updates.unsubscribe")]
+pub async fn unsubscribe_from_profile_updates(ctx: &mut EchoContext) -> RouteResult<()> {
+    let not_interested_in: Vec<SnowflakeID> = ctx.stream.receive().await?;
+
+    for id in not_interested_in {
+        ctx.profile_update_pubsub.unsubscribe(ctx.user.unwrap(), id);
+    }
+
+    Ok(())
+}
+
+#[route("users.updates.unsubscribe.all")]
+pub async fn unsubscribe_from_all_profile_updates(ctx: &mut EchoContext) -> RouteResult<()> {
+    ctx.profile_update_pubsub.unsubscribe_all(ctx.user.unwrap());
+
+    Ok(())
+}
+
+#[route("users.delete")]
+pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
+    let delete_all_data: bool = ctx.stream.receive().await?;
+
+    if delete_all_data {
+        execute!(
+            &ctx.pool,
+            "DELETE FROM users WHERE id = $1",
+            ctx.user.unwrap()
+        );
+    }
+    else {
+        let valid = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+        let extension: String = rand::random_iter::<u8>()
+            .take(14)
+            .map(|idx| idx as usize)
+            .map(|idx| char::from(valid[idx % valid.len()]))
+            .collect();
+
+        let stmt = "
+            UPDATE users
+            SET
+                name = $2,
+                display_name = 'Deleted Account',
+                status = '',
+                about_me = 'This account has been deleted by the user.',
+                activity = 'Offline',
+                avatar = NULL,
+                encrypted_secret = $3
+            WHERE id = $1
+        ";
+
+        let fake_verifier: SignatureVerifier = (*SigningKey::generate().verifying_key()).into();
+
+        let mut tx = ctx
+            .pool
+            .begin()
+            .await
+            .context(E::Database)?;
+
+        execute!(
+            &mut *tx,
+            stmt,
+            ctx.user.unwrap(),
+            format!("deleted.account.{extension}"),
+            Vec::<u8>::new()
+        );
+
+        execute!(
+            &mut *tx,
+            "UPDATE users_public_keys SET signature_verifier = $2 WHERE user_id = $1",
+            ctx.user.unwrap(),
+            fake_verifier
+        );
+
+        tx.commit().await.context(E::Database)?;
+    }
+
+    ctx.user = None;
+
+    Ok(())
 }
 
 #[route("users.friends.get")]

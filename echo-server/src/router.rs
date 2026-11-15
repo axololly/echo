@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use echo_types::SnowflakeID;
 use sqlx::postgres::PgPool;
 
-use crate::{asset_storage::AssetStorage, backoffice::RunningTasks, error::{RouteError, RouteResult}, events::{EventDispatcher, TypingEventPubSub}, stream::Stream};
+use crate::{asset_storage::AssetStorage, backoffice::RunningTasks, error::{RouteError, RouteResult}, events::{EventDispatcher, ProfileUpdatePubSub, TypingEventPubSub}, stream::Stream};
 
 /// A route that a client can take through the API.
 ///
@@ -41,6 +41,7 @@ pub struct EchoContext {
     pub asset_storage: AssetStorage,
     pub running_tasks: RunningTasks,
     pub typing_event_pubsub: TypingEventPubSub,
+    pub profile_update_pubsub: ProfileUpdatePubSub,
     pub stream: Stream,
     pub user: Option<SnowflakeID>
 }
@@ -72,6 +73,11 @@ impl EchoRouter {
         router.register_route(accept_friend_request);
         router.register_route(cancel_friend_request);
         router.register_route(decline_friend_request);
+        router.register_route(update_user_account);
+        router.register_route(subscribe_to_profile_updates);
+        router.register_route(unsubscribe_from_profile_updates);
+        router.register_route(unsubscribe_from_all_profile_updates);
+        router.register_route(delete_user_account);
 
         // Event listener route
         router.register_route(listen_to_events);

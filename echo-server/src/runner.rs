@@ -7,7 +7,7 @@ use sqlx::postgres::PgPool;
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, error::ANOTHER_DEVICE_LOGGED_IN, events::{EventDispatcher, TypingEventPubSub}, execute, router::{EchoContext, EchoRouter}, stream::Stream};
+use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, error::ANOTHER_DEVICE_LOGGED_IN, events::{EventDispatcher, ProfileUpdatePubSub, TypingEventPubSub}, execute, router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -56,6 +56,7 @@ pub async fn run(
     let event_dispatcher = EventDispatcher::default();
 
     let typing_event_pubsub = TypingEventPubSub::with_dispatcher(event_dispatcher.clone());
+    let profile_update_pubsub = ProfileUpdatePubSub::with_dispatcher(event_dispatcher.clone());
 
     let asset_storage = AssetStorage::new(
         asset_dir.as_ref().to_path_buf()
@@ -89,7 +90,10 @@ pub async fn run(
             event_dispatcher.clone(),
             asset_storage.clone(),
             running_tasks.clone(),
-            typing_event_pubsub.clone()
+            (
+                typing_event_pubsub.clone(),
+                profile_update_pubsub.clone()
+            )
         ));
     }
 
@@ -109,15 +113,17 @@ async fn handle_incoming_requests(
     dispatcher: EventDispatcher,
     asset_storage: AssetStorage,
     running_tasks: RunningTasks,
-    typing_event_pubsub: TypingEventPubSub
+    pubsubs: (TypingEventPubSub, ProfileUpdatePubSub)
 ) -> Result<()> {
     let client_ip = parent.remote_address();
     let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
+    let (typing_event_pubsub, profile_update_pubsub) = pubsubs;
 
     tokio::spawn(handle_disconnect(
         parent.clone(),
         pool.clone(),
         typing_event_pubsub.clone(),
+        profile_update_pubsub.clone(),
         authenticated_user.clone()
     ));
 
@@ -134,7 +140,8 @@ async fn handle_incoming_requests(
             running_tasks: running_tasks.clone(),
             pool: pool.clone(),
             user: { *authenticated_user.lock().await },
-            typing_event_pubsub: typing_event_pubsub.clone()
+            typing_event_pubsub: typing_event_pubsub.clone(),
+            profile_update_pubsub: profile_update_pubsub.clone()
         };
 
         // let authenticated_user = authenticated_user.clone();
@@ -193,12 +200,16 @@ async fn handle_single_request(
                 user_id
             );
 
+            ctx.profile_update_pubsub.publish(user_id);
+
             if let Some(prev) = *auth_user {
                 execute!(
                     &mut *tx,
                     "UPDATE users SET status = 'Offline' WHERE id = $1",
                     prev
                 );
+
+                ctx.profile_update_pubsub.publish(prev);
             }
 
             let _ = tx.commit().await;
@@ -214,6 +225,7 @@ async fn handle_disconnect(
     conn: quinn::Connection,
     pool: PgPool,
     typing_event_pubsub: TypingEventPubSub,
+    profile_update_pubsub: ProfileUpdatePubSub,
     authenticated_user: Arc<Mutex<Option<SnowflakeID>>>
 ) -> Result<()> {
     conn.closed().await;
@@ -223,6 +235,7 @@ async fn handle_disconnect(
     };
 
     typing_event_pubsub.unsubscribe(user_id);
+    profile_update_pubsub.unsubscribe_all(user_id);
 
     USER_CONNECTIONS.remove(&user_id);
 

@@ -1,20 +1,8 @@
 # ROADMAP
 
-## Server - TODO: Updating accounts
-
-- [ ] Be able to change a display name and have it readily updated on other clients
-- [ ] Notify a user if a username transfer was successful or not, and optionally update their friends about the name change so they don’t get confused by the person with the new profile
-- [ ] Allow a user to upload their own profile picture, which could be static or animated, or specify a profile picture from a link
-- [ ] Be able to change a status and have it readily updated on other clients
-- [ ] Be able to change an activity indicator and have it readily updated on other clients
-
 ## Rejected Features  
 
 - Be able to ignore future friend requests from a specific user (without notifying them)
-
-## Server - TODO: Miscellaneous
-
-- [ ] Be able to delete accounts on hosts, which will then prevent other users from determining who wrote a message
 
 ## UI
 

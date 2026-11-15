@@ -13,10 +13,9 @@ CREATE DOMAIN "AssetID" AS TEXT CHECK (length(VALUE) = 64);
 -- One row here is an entire user account.
 CREATE TABLE users (
     id INT8 PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE
-        CHECK (char_length(name) BETWEEN 3 AND 20),
+    name TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL
-        CHECK (char_length(display_name) BETWEEN 3 AND 20),
+        CHECK (char_length(display_name) BETWEEN 1 AND 30),
     avatar "AssetID",
     activity "Activity" NOT NULL,
     about_me TEXT NOT NULL CHECK (char_length(about_me) <= 2000),
