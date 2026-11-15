@@ -14,7 +14,6 @@
 
 ## Server - TODO: Miscellaneous
 
-- [ ] Allow anyone in a group chat to add another user
 - [ ] Be able to delete accounts on hosts, which will then prevent other users from determining who wrote a message
 
 ## UI

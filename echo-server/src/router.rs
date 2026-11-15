@@ -82,6 +82,7 @@ impl EchoRouter {
         router.register_route(update_group_appearance);
         router.register_route(join_group);
         router.register_route(leave_group);
+        router.register_route(add_friend_to_group);
         router.register_route(kick_group_member);
         router.register_route(ban_group_member);
         router.register_route(unban_group_member);
