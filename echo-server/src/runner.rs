@@ -7,7 +7,7 @@ use sqlx::postgres::PgPool;
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, events::EventDispatcher, router::{EchoContext, EchoRouter}, stream::Stream};
+use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, events::{EventDispatcher, TypingEventPubSub}, router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -55,6 +55,8 @@ pub async fn run(
 
     let event_dispatcher = EventDispatcher::default();
 
+    let typing_event_pubsub = TypingEventPubSub::with_dispatcher(event_dispatcher.clone());
+
     let asset_storage = AssetStorage::new(
         asset_dir.as_ref().to_path_buf()
     );
@@ -86,7 +88,8 @@ pub async fn run(
             pool.clone(),
             event_dispatcher.clone(),
             asset_storage.clone(),
-            running_tasks.clone()
+            running_tasks.clone(),
+            typing_event_pubsub.clone()
         ));
     }
 
@@ -103,7 +106,8 @@ async fn handle_incoming_requests(
     pool: PgPool,
     dispatcher: EventDispatcher,
     asset_storage: AssetStorage,
-    running_tasks: RunningTasks
+    running_tasks: RunningTasks,
+    typing_event_pubsub: TypingEventPubSub
 ) -> Result<()> {
     let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
 
@@ -119,7 +123,8 @@ async fn handle_incoming_requests(
             asset_storage: asset_storage.clone(),
             running_tasks: running_tasks.clone(),
             pool: pool.clone(),
-            user: { *authenticated_user.lock().await }
+            user: { *authenticated_user.lock().await },
+            typing_event_pubsub: typing_event_pubsub.clone()
         };
 
         let authenticated_user = authenticated_user.clone();

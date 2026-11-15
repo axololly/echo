@@ -3,10 +3,9 @@ use std::{ops::{Deref, DerefMut}, sync::Arc};
 use chrono::TimeDelta;
 use dashmap::{DashMap, DashSet};
 use echo_types::{AssetID, Emoji, GroupInvite, SnowflakeID};
-use pubsub_rs::Pubsub;
 use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
+use tokio::sync::{mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
 
 use crate::{error::RouteResult, fetch_all_scalar, router::EchoContext};
 
@@ -110,6 +109,12 @@ pub enum Event {
     ConversationTimerUpdated {
         conversation_id: SnowflakeID,
         new_message_timer: Option<TimeDelta>
+    },
+
+    /// User started typing
+    UserStartedTyping {
+        conversation_id: SnowflakeID,
+        user_id: SnowflakeID
     }
 }
 
@@ -151,7 +156,7 @@ pub struct EventDispatcher {
 
 impl EventDispatcher {
     /// Add a new ID to be notified of certain things.
-    pub async fn register(&self, id: SnowflakeID) -> Notified {
+    pub fn register(&self, id: SnowflakeID) -> Notified {
         let (sender, receiver) = unbounded_channel();
 
         self.notifiers.insert(id, sender);
@@ -230,4 +235,63 @@ pub async fn dispatch_event_for_conversation(
     ctx.dispatcher.dispatch(members, event);
 
     Ok(())
+}
+
+#[derive(Clone)]
+pub struct TypingEventPubSub {
+    conversational_interests: Arc<DashMap<SnowflakeID, DashSet<SnowflakeID>>>,
+    user_interests: Arc<DashMap<SnowflakeID, SnowflakeID>>,
+    dispatcher: EventDispatcher
+}
+
+impl TypingEventPubSub {
+    pub fn with_dispatcher(dispatcher: EventDispatcher) -> Self {
+        Self {
+            dispatcher,
+            conversational_interests: Default::default(),
+            user_interests: Default::default()
+        }
+    }
+
+    pub fn subscribe(&self, conversation_id: SnowflakeID, user_id: SnowflakeID) {
+        let interested = self
+            .conversational_interests
+            .entry(conversation_id)
+            .or_default();
+
+        interested.insert(user_id);
+
+        let prev_conv_id = self.user_interests.insert(user_id, conversation_id);
+
+        if let Some(id) = prev_conv_id {
+            self.conversational_interests
+                .get(&id)
+                .and_then(|interested| interested.remove(&id));
+        }
+    }
+
+    pub fn unsubscribe(&self, user_id: SnowflakeID) {
+        let Some((_, conversation_id)) = self.user_interests.remove(&user_id) else {
+            return;
+        };
+
+        self.conversational_interests
+            .get(&conversation_id)
+            .and_then(|interested| interested.remove(&user_id));
+    }
+
+    pub fn publish(&self, conversation_id: SnowflakeID, user_id: SnowflakeID) {
+        let Some(users) = self.conversational_interests.get(&conversation_id) else {
+            return;
+        };
+
+        let users = users
+            .iter()
+            .map(|id| *id);
+
+        self.dispatcher.dispatch(users, Event::UserStartedTyping {
+            conversation_id,
+            user_id
+        });
+    }
 }

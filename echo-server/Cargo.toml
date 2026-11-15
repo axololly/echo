@@ -7,6 +7,7 @@ edition = "2024"
 async-trait = "0.1.92"
 bitcode = "0.6.9"
 chrono = "0.4.45"
+dashmap = "6.2.1"
 echo-server-derive = { path = "../echo-server-derive" }
 echo-tasks = { path = "../echo-tasks" }
 echo-types = { path = "../echo-types" }
