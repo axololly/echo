@@ -88,3 +88,38 @@ pub async fn update_default_message_timer(ctx: &mut EchoContext) -> RouteResult<
 
     Ok(())
 }
+
+#[route("conversations.typing.subscribe")]
+pub async fn subscribe_to_typing_events(ctx: &mut EchoContext) -> RouteResult<()> {
+    let conversation_id: SnowflakeID = ctx.stream.receive().await?;
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Conversation(C::ConversationNotFound));
+    }
+
+    ctx.typing_event_pubsub.subscribe(conversation_id, ctx.user.unwrap());
+
+    Ok(())
+}
+
+#[route("conversations.typing.unsubscribe")]
+pub async fn unsubscribe_from_all_typing_events(ctx: &mut EchoContext) -> RouteResult<()> {
+    ctx.typing_event_pubsub.unsubscribe(ctx.user.unwrap());
+
+    Ok(())
+}
+
+#[route("conversations.typing.start")]
+pub async fn start_typing_in_conversation(ctx: &mut EchoContext) -> RouteResult<()> {
+    let conversation_id: SnowflakeID = ctx.stream.receive().await?;
+
+    if !is_part_of_conversation(ctx, conversation_id).await? {
+        bail!(E::Conversation(C::ConversationNotFound));
+    }
+
+    let user = ctx.user.unwrap();
+
+    ctx.typing_event_pubsub.publish(conversation_id, user);
+
+    Ok(())
+}

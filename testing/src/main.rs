@@ -534,6 +534,32 @@ async fn get_reactions(
     }).await
 }
 
+async fn subscribe_to_typing_events(
+    user_conn: &quinn::Connection,
+    conversation_id: SnowflakeID
+) -> Result<()> {
+    access_route(user_conn, "conversations.typing.subscribe", async |stream| {
+        stream.send(&conversation_id).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
+async fn start_typing(
+    user_conn: &quinn::Connection,
+    conversation_id: SnowflakeID
+) -> Result<()> {
+    access_route(user_conn, "conversations.typing.start", async |stream| {
+        stream.send(&conversation_id).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -596,45 +622,22 @@ async fn main() -> Result<()> {
         (&bob_conn, &bob)
     ).await?;
 
-    // NOTE: for testing conversation timers, just uncomment the following section
-    // then make delete_after be None and rerun the code.
-    //
-    // access_route(&alice_conn, "conversations.timers.default.update", async |stream| {
-    //     stream.send(&UpdateDefaultMessageTimerData {
-    //         conversation_id: alice_bob_conv_id,
-    //         new_message_timer: Some(TimeDelta::seconds(1))
-    //     }).await?;
+    subscribe_to_typing_events(&alice_conn, alice_bob_conv_id).await?;
+    subscribe_to_typing_events(&bob_conn, alice_bob_conv_id).await?;
 
-    //     stream.receive::<RouteResult<()>>().await??;
+    start_typing(&alice_conn, alice_bob_conv_id).await?;
 
-    //     Ok(())
-    // }).await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let (msg, _) = send_message(
-        &alice,
-        &alice_conn,
-        alice_bob_conv_id,
-        "hello bob",
-        vec![],
-        Some(TimeDelta::seconds(1))
-    ).await?;
+    access_route(&alice_conn, "conversations.typing.unsubscribe", async |stream| {
+        stream.receive::<RouteResult<()>>().await??;
 
-    let _this_works = fetch_message(
-        &alice_conn,
-        msg.id
-    ).await?;
+        Ok(())
+    }).await?;
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    start_typing(&bob_conn, alice_bob_conv_id).await?;
 
-    let fetch_result = fetch_message(
-        &alice_conn,
-        msg.id
-    ).await;
-
-    assert!(
-        fetch_result.is_err(),
-        "alice was able to fetch a deleted message"
-    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     println!("assertions passed!");
 

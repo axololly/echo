@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use echo_types::SnowflakeID;
 use sqlx::postgres::PgPool;
 
-use crate::{asset_storage::AssetStorage, backoffice::RunningTasks, error::{RouteError, RouteResult}, events::EventDispatcher, stream::Stream};
+use crate::{asset_storage::AssetStorage, backoffice::RunningTasks, error::{RouteError, RouteResult}, events::{EventDispatcher, TypingEventPubSub}, stream::Stream};
 
 /// A route that a client can take through the API.
 ///
@@ -40,6 +40,7 @@ pub struct EchoContext {
     pub dispatcher: EventDispatcher,
     pub asset_storage: AssetStorage,
     pub running_tasks: RunningTasks,
+    pub typing_event_pubsub: TypingEventPubSub,
     pub stream: Stream,
     pub user: Option<SnowflakeID>
 }
@@ -106,6 +107,9 @@ impl EchoRouter {
         // Conversation routes
         router.register_route(get_default_message_timer);
         router.register_route(update_default_message_timer);
+        router.register_route(start_typing_in_conversation);
+        router.register_route(subscribe_to_typing_events);
+        router.register_route(unsubscribe_from_all_typing_events);
 
         // Asset route
         router.register_route(fetch_asset);
