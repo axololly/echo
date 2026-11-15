@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}, time::Duration};
 
 use chrono::TimeDelta;
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData, UpdateReadWatermarkData}, runner::run, stream::Stream};
+use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddFriendToGroupData, AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData, UpdateReadWatermarkData}, runner::run, stream::Stream};
 use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings, UserState};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
@@ -633,51 +633,73 @@ async fn main() -> Result<()> {
 
     let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
     let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
+    let (chloe, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
 
-    let alice_bob_conv_id = establish_friendship(
+    establish_friendship(
         (&alice_conn, &alice),
         (&bob_conn, &bob)
     ).await?;
 
-    let (msg, _) = send_message(
-        &alice,
-        &alice_conn,
-        alice_bob_conv_id,
-        "hello",
-        vec![],
-        None
+    establish_friendship(
+        (&bob_conn, &bob),
+        (&chloe_conn, &chloe),
     ).await?;
 
-    let (msg2, _) = send_message(
-        &bob,
-        &bob_conn,
-        alice_bob_conv_id,
-        "hi alice",
-        vec![],
-        None
-    ).await?;
+    let group = access_route(&alice_conn, "groups.create", async |stream| {
+        stream.send(&CreateNewGroupData {
+            name: None,
+            initial_members: vec![bob.id]
+        }).await?;
 
-    update_read_watermark(
-        &alice_conn,
-        alice_bob_conv_id,
-        msg2.id
-    ).await?;
+        let group: Group = stream.receive::<RouteResult<Group>>().await??;
 
-    update_read_watermark(
-        &alice_conn,
-        alice_bob_conv_id,
-        msg.id
-    ).await?;
-
-    let alice_read_watermark = access_route(&bob_conn, "users.friends.get", async |stream| {
-        let friends: Vec<Friend> = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(friends[0].read_watermark.unwrap())
+        Ok(group)
     }).await?;
 
+    let non_friend_result = access_route(&alice_conn, "groups.add", async |stream| {
+        stream.send(&AddFriendToGroupData {
+            group_id: group.id,
+            friend_id: chloe.id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await;
+
+    assert!(
+        non_friend_result.is_err(),
+        "alice was able to add chloe despite not being friends with her"
+    );
+
+    access_route(&bob_conn, "groups.add", async |stream| {
+        stream.send(&AddFriendToGroupData {
+            group_id: group.id,
+            friend_id: chloe.id
+        }).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    let new_group = access_route(&alice_conn, "groups.get", async |stream| {
+        stream.send(&group.id).await?;
+
+        let group: Group = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(group)
+    }).await?;
+
+    let new_members: Vec<_> = new_group
+        .members
+        .iter()
+        .map(|m| m.user_id)
+        .collect();
+
     assert_eq!(
-        alice_read_watermark.message_id, msg2.id,
-        "alice's last viewed message ID was not as expected"
+        new_members, [alice.id, bob.id, chloe.id],
+        "chloe was not added to the group"
     );
 
     println!("assertions passed!");
