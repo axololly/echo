@@ -122,7 +122,10 @@ pub enum Event {
         conversation_id: SnowflakeID,
         user_id: SnowflakeID,
         new_last_message_id_read: SnowflakeID
-    }
+    },
+
+    /// User updated their profile
+    UserUpdatedProfile(SnowflakeID)
 }
 
 type Notifier = UnboundedSender<Arc<Event>>;
@@ -244,9 +247,10 @@ pub async fn dispatch_event_for_conversation(
     Ok(())
 }
 
+/// A pub-sub implementation for implementing typing events.
 #[derive(Clone)]
 pub struct TypingEventPubSub {
-    conversational_interests: Arc<DashMap<SnowflakeID, DashSet<SnowflakeID>>>,
+    interested_in_conversation: Arc<DashMap<SnowflakeID, DashSet<SnowflakeID>>>,
     user_interests: Arc<DashMap<SnowflakeID, SnowflakeID>>,
     dispatcher: EventDispatcher
 }
@@ -255,14 +259,14 @@ impl TypingEventPubSub {
     pub fn with_dispatcher(dispatcher: EventDispatcher) -> Self {
         Self {
             dispatcher,
-            conversational_interests: Default::default(),
+            interested_in_conversation: Default::default(),
             user_interests: Default::default()
         }
     }
 
     pub fn subscribe(&self, conversation_id: SnowflakeID, user_id: SnowflakeID) {
         let interested = self
-            .conversational_interests
+            .interested_in_conversation
             .entry(conversation_id)
             .or_default();
 
@@ -271,7 +275,7 @@ impl TypingEventPubSub {
         let prev_conv_id = self.user_interests.insert(user_id, conversation_id);
 
         if let Some(id) = prev_conv_id {
-            self.conversational_interests
+            self.interested_in_conversation
                 .get(&id)
                 .and_then(|interested| interested.remove(&id));
         }
@@ -282,13 +286,13 @@ impl TypingEventPubSub {
             return;
         };
 
-        self.conversational_interests
+        self.interested_in_conversation
             .get(&conversation_id)
             .and_then(|interested| interested.remove(&user_id));
     }
 
     pub fn publish(&self, conversation_id: SnowflakeID, user_id: SnowflakeID) {
-        let Some(users) = self.conversational_interests.get(&conversation_id) else {
+        let Some(users) = self.interested_in_conversation.get(&conversation_id) else {
             return;
         };
 
@@ -300,5 +304,68 @@ impl TypingEventPubSub {
             conversation_id,
             user_id
         });
+    }
+}
+
+#[derive(Clone)]
+pub struct ProfileUpdatePubSub {
+    publish_to: Arc<DashMap<SnowflakeID, DashSet<SnowflakeID>>>,
+    subscribed_to: Arc<DashMap<SnowflakeID, DashSet<SnowflakeID>>>,
+    dispatcher: EventDispatcher
+}
+
+impl ProfileUpdatePubSub {
+    pub fn with_dispatcher(dispatcher: EventDispatcher) -> Self {
+        Self {
+            dispatcher,
+            publish_to: Default::default(),
+            subscribed_to: Default::default()
+        }
+    }
+
+    pub fn subscribe(&self, user_id: SnowflakeID, target_id: SnowflakeID) {
+        self.subscribed_to
+            .entry(user_id)
+            .or_default()
+            .insert(target_id);
+
+        self.publish_to
+            .entry(target_id)
+            .or_default()
+            .insert(user_id);
+    }
+
+    pub fn unsubscribe(&self, user_id: SnowflakeID, target_id: SnowflakeID) {
+        self.subscribed_to
+            .get(&user_id)
+            .and_then(|set| set.remove(&target_id));
+
+        self.publish_to
+            .get(&target_id)
+            .and_then(|set| set.remove(&user_id));
+    }
+
+    pub fn unsubscribe_all(&self, user_id: SnowflakeID) {
+        let Some((_, target_ids)) = self.subscribed_to.remove(&user_id) else {
+            return;
+        };
+
+        for id in target_ids {
+            self.publish_to
+                .get(&id)
+                .and_then(|set| set.remove(&user_id));
+        }
+    }
+
+    pub fn publish(&self, user_id: SnowflakeID) {
+        let Some(subscribers) = self.publish_to.get(&user_id) else {
+            return;
+        };
+
+        let subscribers = subscribers
+            .iter()
+            .map(|id| *id);
+
+        self.dispatcher.dispatch(subscribers, Event::UserUpdatedProfile(user_id));
     }
 }

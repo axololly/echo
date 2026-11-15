@@ -18,14 +18,14 @@ pub struct Stream {
 
 impl Stream {
     /// Open a bidirectional stream using the given QUIC connection.
-    pub async fn open_bi(parent: &quinn::Connection) -> Result<Self> {
+    pub async fn open_bi(parent: &quinn::Connection) -> Result<Self, quinn::ConnectionError> {
         let (sender, receiver) = parent.open_bi().await?;
 
         Ok(Self { sender, receiver })
     }
 
     /// Accept a bidirectional stream using the given QUIC connection.
-    pub async fn accept_bi(parent: &quinn::Connection) -> Result<Self> {
+    pub async fn accept_bi(parent: &quinn::Connection) -> Result<Self, quinn::ConnectionError> {
         let (sender, receiver) = parent.accept_bi().await?;
 
         Ok(Self { sender, receiver })

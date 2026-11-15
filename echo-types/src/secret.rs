@@ -443,6 +443,12 @@ impl From<Secret> for SignatureVerifier {
     }
 }
 
+impl From<VerifyingKey> for SignatureVerifier {
+    fn from(value: VerifyingKey) -> Self {
+        Self(value)
+    }
+}
+
 /// A value with a signature appended.
 ///
 /// The original data is still recoverable through

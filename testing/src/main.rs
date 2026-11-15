@@ -11,6 +11,7 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
+use structdiff::StructDiff;
 use tokio::fs;
 use vodozemac::megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig};
 
@@ -577,6 +578,37 @@ async fn update_read_watermark(
     }).await
 }
 
+async fn fetch_user(
+    user_conn: &quinn::Connection,
+    user_id: SnowflakeID
+) -> Result<User> {
+    access_route(user_conn, "users.get", async |stream| {
+        stream.send(&user_id).await?;
+
+        let user = stream.receive::<RouteResult<_>>().await??;
+
+        Ok(user)
+    }).await
+}
+
+async fn update_account(
+    user_conn: &quinn::Connection,
+    old: &User,
+    new: &User
+) -> Result<()> {
+    access_route(user_conn, "users.update", async |stream| {
+        let diffs = old.diff(new);
+
+        dbg!(&diffs);
+
+        stream.send(&diffs).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let temp = PgTempDB::from_builder(
@@ -641,65 +673,65 @@ async fn main() -> Result<()> {
     ).await?;
 
     establish_friendship(
-        (&bob_conn, &bob),
-        (&chloe_conn, &chloe),
+        (&alice_conn, &alice),
+        (&chloe_conn, &chloe)
     ).await?;
 
     let group = access_route(&alice_conn, "groups.create", async |stream| {
         stream.send(&CreateNewGroupData {
             name: None,
-            initial_members: vec![bob.id]
+            initial_members: vec![bob.id, chloe.id]
         }).await?;
-
-        let group: Group = stream.receive::<RouteResult<Group>>().await??;
-
-        Ok(group)
-    }).await?;
-
-    let non_friend_result = access_route(&alice_conn, "groups.add", async |stream| {
-        stream.send(&AddFriendToGroupData {
-            group_id: group.id,
-            friend_id: chloe.id
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await;
-
-    assert!(
-        non_friend_result.is_err(),
-        "alice was able to add chloe despite not being friends with her"
-    );
-
-    access_route(&bob_conn, "groups.add", async |stream| {
-        stream.send(&AddFriendToGroupData {
-            group_id: group.id,
-            friend_id: chloe.id
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    let new_group = access_route(&alice_conn, "groups.get", async |stream| {
-        stream.send(&group.id).await?;
 
         let group: Group = stream.receive::<RouteResult<_>>().await??;
 
         Ok(group)
     }).await?;
 
-    let new_members: Vec<_> = new_group
-        .members
-        .iter()
-        .map(|m| m.user_id)
-        .collect();
+    let (msg, _) = send_message(
+        &bob,
+        &bob_conn,
+        group.id,
+        "hello guys",
+        vec![],
+        None
+    ).await?;
 
-    assert_eq!(
-        new_members, [alice.id, bob.id, chloe.id],
-        "chloe was not added to the group"
+    access_route(&bob_conn, "users.delete", async |stream| {
+        // Delete all her data
+        stream.send(&false).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    // This will succeed
+    fetch_message(&alice_conn, msg.id).await?;
+
+    let (msg2, _) = send_message(
+        &chloe,
+        &chloe_conn,
+        group.id,
+        "hello guys",
+        vec![],
+        None
+    ).await?;
+
+    access_route(&chloe_conn, "users.delete", async |stream| {
+        // Delete all her data
+        stream.send(&true).await?;
+
+        stream.receive::<RouteResult<()>>().await??;
+
+        Ok(())
+    }).await?;
+
+    let fetch_result = fetch_message(&alice_conn, msg2.id).await;
+
+    assert!(
+        fetch_result.is_err(),
+        "alice was able to fetch a message chloe requested to be deleted"
     );
 
     println!("assertions passed!");
