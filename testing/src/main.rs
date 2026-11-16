@@ -638,7 +638,7 @@ async fn main() -> Result<()> {
     // Start the server up
     tokio::spawn(run(
         SERVER_ADDR,
-        cert.clone(),
+        vec![cert.clone()],
         key.into(),
         10,
         Arc::new(EchoRouter::new()),
