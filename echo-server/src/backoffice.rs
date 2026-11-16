@@ -3,8 +3,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use echo_tasks::interval;
 use echo_types::SnowflakeID;
-use rootcause::{Result, prelude::ResultExt};
+use rootcause::{Report, Result, prelude::ResultExt};
 use sqlx::PgPool;
+use tracing::error;
 
 use crate::{execute, fetch_opt_as};
 
@@ -14,8 +15,13 @@ pub struct TaskContext {
     pub pool: PgPool
 }
 
+async fn error_handler(err: Report) {
+    error!("Encountered error when running background task: {err:?}");
+}
+
 #[interval(hours = 6)]
 #[rename(RemoveUnusedSessionData)]
+#[on_error(error_handler)]
 pub async fn remove_unused_session_data(ctx: TaskContext) -> Result<()> {
     let clear_megolm_messages_stmt = "
         DELETE FROM pending_message_keys pgmk

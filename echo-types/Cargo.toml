@@ -18,7 +18,7 @@ rootcause = "0.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = { version = "0.11.0", features = ["zeroize"] }
 sqlx = { version = "0.9.0", features = ["postgres", "runtime-tokio"] }
-structdiff = { version = "0.7.3", features = ["serde"] }
+structdiff = { version = "0.7.3", features = ["debug_diffs", "serde"] }
 thiserror = "2.0.21"
 vodozemac = "0.11.1"
 zstd = "0.14.3"

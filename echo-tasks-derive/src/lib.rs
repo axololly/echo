@@ -41,7 +41,7 @@ pub fn interval(
 
         let make_duration = valid_units
             .remove(ident)
-            .unwrap_or_else(|| panic!("duplicate values for parameter: {ident}"));
+            .unwrap_or_else(|| panic!("duplicate or unrecognised parameter: {ident}"));
 
         duration += make_duration(value);
     }
@@ -210,6 +210,9 @@ pub fn interval(
             }
 
             async fn callback(&self, RUNNING_TASK: ::echo_tasks::task::RunningTask) {
+                let span = ::tracing::span!(::tracing::Level::DEBUG, "task", name = stringify!(#fn_name));
+                let _enter = span.enter();
+
                 let inner = async |#ctx_param| #ret_type {
                     #body
                 };

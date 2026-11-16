@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::prelude::FromRow;
 use structdiff::StructDiff;
 use thiserror::Error;
+use tracing::info;
 
 use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_as, fetch_opt, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
 
@@ -75,15 +76,19 @@ pub async fn login(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::User(U::AuthenticationFailed));
     }
 
+    info!("User has logged in as {username:?} (ID: {user_id}");
+
     Ok(())
 }
 
 #[route("users.get")]
 pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
-    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+    let user_id: SnowflakeID = ctx
         .stream
         .receive()
         .await?;
+
+    info!("User is trying to fetch account with ID {user_id}");
 
     let user: User = fetch_opt_as!(
         &ctx.pool,
@@ -96,7 +101,7 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
 
 #[route("users.keys.public.get")]
 pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPublicKeys> {
-    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+    let user_id: SnowflakeID = ctx
         .stream
         .receive()
         .await?;
@@ -118,7 +123,7 @@ pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPubl
 #[route("users.info.encrypted.get")]
 #[no_auth]
 pub async fn get_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<UserEncryptedInfo> {
-    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+    let user_id: SnowflakeID = ctx
         .stream
         .receive()
         .await?;
@@ -257,6 +262,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 
     tx.commit().await.context(E::Database)?;
 
+    info!("User created account with username {:?} and ID {}", &user.name, user.id);
+
     ctx.user = Some(user.id);
 
     Ok(user)
@@ -281,7 +288,7 @@ pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
         ctx.user.unwrap()
     );
 
-    let new = old.apply_ref(diffs);
+    let new = old.apply_ref(diffs.clone());
 
     if new.name != old.name {
         if !VALID_USERNAME_REGEX.is_match(&new.name) {
@@ -341,6 +348,8 @@ pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
         &new.show_in_searches
     );
 
+    info!("User updated their profile with the following diffs: {diffs:?}");
+
     ctx.profile_update_pubsub.publish(ctx.user.unwrap());
 
     Ok(())
@@ -386,12 +395,16 @@ pub async fn update_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<()
         new.settings
     );
 
+    info!("User updated their encrypted information");
+
     Ok(())
 }
 
 #[route("users.updates.subscribe")]
 pub async fn subscribe_to_profile_updates(ctx: &mut EchoContext) -> RouteResult<()> {
     let interested_in: Vec<SnowflakeID> = ctx.stream.receive().await?;
+
+    info!("User subscribed to receive profile updates about the following users: {interested_in:?}");
 
     for id in interested_in {
         ctx.profile_update_pubsub.subscribe(ctx.user.unwrap(), id);
@@ -404,6 +417,8 @@ pub async fn subscribe_to_profile_updates(ctx: &mut EchoContext) -> RouteResult<
 pub async fn unsubscribe_from_profile_updates(ctx: &mut EchoContext) -> RouteResult<()> {
     let not_interested_in: Vec<SnowflakeID> = ctx.stream.receive().await?;
 
+    info!("User is unsubscribing from receiving profile updates about the following users: {not_interested_in:?}");
+
     for id in not_interested_in {
         ctx.profile_update_pubsub.unsubscribe(ctx.user.unwrap(), id);
     }
@@ -413,6 +428,8 @@ pub async fn unsubscribe_from_profile_updates(ctx: &mut EchoContext) -> RouteRes
 
 #[route("users.updates.unsubscribe.all")]
 pub async fn unsubscribe_from_all_profile_updates(ctx: &mut EchoContext) -> RouteResult<()> {
+    info!("User is unsubscribing from profile updates for all users");
+
     ctx.profile_update_pubsub.unsubscribe_all(ctx.user.unwrap());
 
     Ok(())
@@ -481,6 +498,8 @@ pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
 
         tx.commit().await.context(E::Database)?;
     }
+
+    info!("User deleted their account");
 
     ctx.user = None;
 
@@ -642,6 +661,8 @@ pub async fn remove_friend(ctx: &mut EchoContext) -> RouteResult<()> {
 
     tx.commit().await.context(E::Database)?;
 
+    info!("User is no longer friends with user {target}");
+
     ctx.dispatcher.dispatch(
         [target],
         Event::NoLongerFriendsWith(user)
@@ -715,6 +736,8 @@ pub async fn create_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         receiver
     );
 
+    info!("User sent a friend request to user {receiver}");
+
     ctx.dispatcher.dispatch(
         [receiver],
         Event::NewFriendRequest(sender)
@@ -779,6 +802,8 @@ pub async fn accept_friend_request(ctx: &mut EchoContext) -> RouteResult<Snowfla
 
     tx.commit().await.context(E::Database)?;
 
+    info!("User accepted a friend request from user {sender}");
+
     ctx.dispatcher.dispatch(
         [sender],
         Event::UserAcceptedFriendRequest(receiver)
@@ -803,6 +828,8 @@ pub async fn decline_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::User(U::NotFound));
     }
 
+    info!("User declined a friend request from user {sender}");
+
     Ok(())
 }
 
@@ -821,6 +848,8 @@ pub async fn cancel_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     if !friend_request_exists {
         bail!(E::User(U::NotFound));
     }
+
+    info!("User cancelled their friend request to {receiver}");
 
     Ok(())
 }

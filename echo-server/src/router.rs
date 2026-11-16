@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use echo_types::SnowflakeID;
 use sqlx::postgres::PgPool;
+use tracing::{Level, error, info, span};
 
 use crate::{asset_storage::AssetStorage, backoffice::RunningTasks, error::{RouteError, RouteResult}, events::{EventDispatcher, ProfileUpdatePubSub, TypingEventPubSub}, stream::Stream};
 
@@ -139,7 +140,12 @@ impl EchoRouter {
     pub async fn run_with(&self, ctx: &mut EchoContext) -> RouteResult<()> {
         match self.routes.get(ctx.route_name.as_str()) {
             Some(route) => {
+                let span = span!(Level::DEBUG, "routing", route_name = route.name());
+                let _enter = span.enter();
+
                 if route.needs_authentication() && ctx.user.is_none() {
+                    info!("Route requires authentication, aborting...");
+
                     ctx.stream.send(&Err::<(), _>(RouteError::NeedsAuthentication)).await?;
 
                     return Ok(());
@@ -149,7 +155,14 @@ impl EchoRouter {
 
                 ctx.stream.send(&ok).await?;
 
-                route.callback(ctx).await?;
+                let result = route.callback(ctx).await;
+
+                if let Err(report) = &result {
+                    error!("Route finished with ERROR: {report:?}");
+                }
+                else {
+                    info!("Route finished with OK");
+                }
             },
             None => {
                 ctx.stream.send(&Err::<(), _>(RouteError::UnknownResource)).await?;

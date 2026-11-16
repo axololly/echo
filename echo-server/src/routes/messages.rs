@@ -6,6 +6,7 @@ use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, postgres::types::PgInterval, prelude::FromRow};
 use thiserror::Error;
+use tracing::info;
 use vodozemac::megolm::{GroupSessionPickle, MegolmMessage, SessionKey};
 
 use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
@@ -405,6 +406,8 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         }
     ).await?;
 
+    info!("User sent new message with ID {message_id} in conversation {conversation_id}");
+
     Ok(Message {
         id: message_id,
         conversation_id,
@@ -525,6 +528,8 @@ pub async fn get_message_history(ctx: &mut EchoContext) -> RouteResult<Compresse
         .map(|MessageAndSecret { message, secret }| (message, secret))
         .collect();
 
+    info!("User fetched messages from conversation {conversation_id} using parameters: {params:?}");
+
     Ok(messages.compress())
 }
 
@@ -613,6 +618,8 @@ pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
 
         processed_messages.retain(|id, _| unprocessed_messages.contains_key(id));
 
+        info!("User processed {}/{} messages", processed_messages.len(), unprocessed_messages.len());
+
         let mut tx = ctx
             .pool
             .begin()
@@ -690,6 +697,15 @@ pub async fn update_pin_status_on_message(ctx: &mut EchoContext) -> RouteResult<
             message_id,
             pinned: true
         }).await?;
+
+        let (verb, count) = if new_pin_status {
+            ("pinned", pinned_messages + 1)
+        }
+        else {
+            ("unpinned", pinned_messages - 1)
+        };
+
+        info!("User {verb} message {message_id} in conversation {conversation_id} ({count}/500 pinned total)");
     }
 
     Ok(())
@@ -743,6 +759,8 @@ pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         message_id
     );
 
+    info!("User fetched individual message with ID {message_id} in conversation {conversation_id}");
+
     Ok(message)
 }
 
@@ -782,6 +800,8 @@ pub async fn edit_message(ctx: &mut EchoContext) -> RouteResult<()> {
         message_id,
         new_body
     );
+
+    info!("User edited message with ID {message_id} in conversation {conversation_id}");
 
     dispatch_event_for_conversation(
         ctx,
@@ -835,6 +855,8 @@ pub async fn delete_message(ctx: &mut EchoContext) -> RouteResult<()> {
         "DELETE FROM messages WHERE id = $1",
         message_id
     );
+
+    info!("User deleted message with ID {message_id} in conversation {conversation_id}");
 
     dispatch_event_for_conversation(
         ctx,
@@ -916,6 +938,8 @@ pub async fn add_new_reaction(ctx: &mut EchoContext) -> RouteResult<()> {
         emoji_id
     );
 
+    info!("User added a reaction with emoji {emoji_id} to message {message_id} in conversation {conversation_id}");
+
     dispatch_event_for_conversation(
         ctx,
         conversation_id,
@@ -970,6 +994,8 @@ pub async fn remove_reaction(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::Messages(M::ReactionNotFound));
     }
 
+    info!("User removed their reaction with emoji {emoji_id} to message {message_id} in conversation {conversation_id}");
+
     dispatch_event_for_conversation(
         ctx,
         conversation_id,
@@ -1013,6 +1039,8 @@ pub async fn get_message_reactions(ctx: &mut EchoContext) -> RouteResult<Vec<Rea
         stmt,
         message_id
     );
+
+    info!("User fetched reactions on message {message_id} in conversation {conversation_id}");
 
     Ok(reactions)
 }
@@ -1065,6 +1093,8 @@ pub async fn update_read_watermark(ctx: &mut EchoContext) -> RouteResult<()> {
         ctx.user.unwrap(),
         message_id
     );
+
+    info!("User advanced their read watermark to message {message_id} in conversation {conversation_id}");
 
     if update_was_made {
         dispatch_event_for_conversation(

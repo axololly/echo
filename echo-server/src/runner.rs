@@ -21,7 +21,7 @@ use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext,
 /// to accept at one given time.
 pub async fn run(
     server_addr: impl ToSocketAddrs,
-    cert: CertificateDer<'static>,
+    certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
     max_connections: usize,
     router: Arc<EchoRouter>,
@@ -30,7 +30,7 @@ pub async fn run(
 ) -> Result<()> {
     let mut crypto = RustlsServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(vec![cert], key)?;
+        .with_single_cert(certs, key)?;
 
     crypto.alpn_protocols = vec![b"hq-29".to_vec()];
 
@@ -144,9 +144,6 @@ async fn handle_incoming_requests(
             profile_update_pubsub: profile_update_pubsub.clone()
         };
 
-        // let authenticated_user = authenticated_user.clone();
-        // let router = router.clone();
-
         // Make a new task for each request that gets handled.
         // This is to allow multiple requests to be handled at the same time.
         tokio::spawn(handle_single_request(
@@ -179,41 +176,32 @@ async fn handle_single_request(
     router: Arc<EchoRouter>,
     authenticated_user: Arc<Mutex<Option<SnowflakeID>>>
 ) -> Result<()> {
-    let result = router.run_with(&mut ctx).await;
-
-    if let Err(report) = &result {
-        // For debug purposes
-        println!("Error encountered on server: {report:?}");
-    }
-
-    let stripped = result.map_err(|report| report.into_current_context());
-
-    let _ = ctx.stream.send(&stripped).await;
+    router.run_with(&mut ctx).await?;
 
     let mut auth_user = authenticated_user.lock().await;
 
     if ctx.user != *auth_user && let Some(user_id) = ctx.user {
-        if let Ok(mut tx) = ctx.pool.begin().await {
+        let mut tx = ctx.pool.begin().await?;
+
+        execute!(
+            &mut *tx,
+            "UPDATE users SET status = 'Online' WHERE id = $1",
+            user_id
+        );
+
+        ctx.profile_update_pubsub.publish(user_id);
+
+        if let Some(prev) = *auth_user {
             execute!(
                 &mut *tx,
-                "UPDATE users SET status = 'Online' WHERE id = $1",
-                user_id
+                "UPDATE users SET status = 'Offline' WHERE id = $1",
+                prev
             );
 
-            ctx.profile_update_pubsub.publish(user_id);
-
-            if let Some(prev) = *auth_user {
-                execute!(
-                    &mut *tx,
-                    "UPDATE users SET status = 'Offline' WHERE id = $1",
-                    prev
-                );
-
-                ctx.profile_update_pubsub.publish(prev);
-            }
-
-            let _ = tx.commit().await;
+            ctx.profile_update_pubsub.publish(prev);
         }
+
+        tx.commit().await?;
 
         *auth_user = ctx.user;
     }

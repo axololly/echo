@@ -4,6 +4,7 @@ use rootcause::{bail, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::types::PgInterval;
 use thiserror::Error;
+use tracing::{debug, info};
 
 use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_opt_scalar, route, router::EchoContext};
 
@@ -19,12 +20,16 @@ async fn is_part_of_conversation(
     ctx: &mut EchoContext,
     conversation_id: SnowflakeID
 ) -> RouteResult<bool> {
+    let user_id = ctx.user.unwrap();
+
     let is_member = exists!(
         &ctx.pool,
         "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
         conversation_id,
-        ctx.user.unwrap()
+        user_id
     );
+
+    debug!("Checking if user {user_id} is part of conversation {conversation_id}: {is_member}");
 
     Ok(is_member)
 }
@@ -49,6 +54,8 @@ pub async fn get_default_message_timer(ctx: &mut EchoContext) -> RouteResult<Opt
         + TimeDelta::days(iv.days as i64)
         + TimeDelta::microseconds(iv.microseconds)
     });
+
+    debug!("Message timer for conversation {conversation_id} is: {maybe_timer:?}");
 
     Ok(maybe_timer)
 }
@@ -77,6 +84,8 @@ pub async fn update_default_message_timer(ctx: &mut EchoContext) -> RouteResult<
         new_message_timer
     );
 
+    info!("Message timer for conversation {conversation_id} was updated to: {new_message_timer:?}");
+
     dispatch_event_for_conversation(
         ctx,
         conversation_id,
@@ -97,14 +106,22 @@ pub async fn subscribe_to_typing_events(ctx: &mut EchoContext) -> RouteResult<()
         bail!(E::Conversation(C::ConversationNotFound));
     }
 
-    ctx.typing_event_pubsub.subscribe(conversation_id, ctx.user.unwrap());
+    let user = ctx.user.unwrap();
+
+    ctx.typing_event_pubsub.subscribe(conversation_id, user);
+
+    info!("User {user} is now subscribed to typing events in conversation {conversation_id}");
 
     Ok(())
 }
 
 #[route("conversations.typing.unsubscribe")]
 pub async fn unsubscribe_from_all_typing_events(ctx: &mut EchoContext) -> RouteResult<()> {
-    ctx.typing_event_pubsub.unsubscribe(ctx.user.unwrap());
+    let user = ctx.user.unwrap();
+
+    ctx.typing_event_pubsub.unsubscribe(user);
+
+    info!("User {user} has unsubscribed from all typing events");
 
     Ok(())
 }
@@ -118,6 +135,8 @@ pub async fn start_typing_in_conversation(ctx: &mut EchoContext) -> RouteResult<
     }
 
     let user = ctx.user.unwrap();
+
+    info!("User {user} is typing in conversation {conversation_id}");
 
     ctx.typing_event_pubsub.publish(conversation_id, user);
 

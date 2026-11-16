@@ -93,6 +93,10 @@ impl AssetStorage {
             .join(parent)
             .join(child);
 
-        fs::remove_file(path).await
+        if fs::try_exists(&path).await? {
+            fs::remove_file(path).await?;
+        }
+
+        Ok(())
     }
 }

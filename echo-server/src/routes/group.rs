@@ -7,6 +7,7 @@ use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::info;
 
 use crate::{error::{RouteError as E, RouteResult}, events::{Event, dispatch_event_for_conversation}, execute, exists, fetch_all_as, fetch_all_scalar, fetch_one_as, fetch_one_scalar, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
 
@@ -229,6 +230,8 @@ pub async fn create_new_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         |member_id| Event::MemberJoinedGroup { group_id, member_id }
     );
 
+    info!("Created a group (ID: {group_id}, name: {name:?}, members: {initial_members:?})");
+
     Ok(Group {
         id: group_id,
         name: group_name.to_string(),
@@ -341,10 +344,10 @@ async fn get_group_owner(
 pub struct GroupAppearanceUpdateData {
     pub group_id: SnowflakeID,
     pub new_name: Option<String>,
-    pub new_avatar: Option<AssetID>
+    pub new_avatar: Option<Vec<u8>>
 }
 
-#[route("groups.appearance.edit")]
+#[route("groups.appearance.update")]
 pub async fn update_group_appearance(ctx: &mut EchoContext) -> RouteResult<()> {
     let GroupAppearanceUpdateData {
         group_id,
@@ -361,6 +364,20 @@ pub async fn update_group_appearance(ctx: &mut EchoContext) -> RouteResult<()> {
     if let Some(name) = &new_name && !VALID_GROUP_NAME_REGEX.is_match(name) {
         bail!(E::InvalidData);
     }
+
+    let new_avatar = if let Some(data) = new_avatar {
+        let asset_id = ctx
+            .asset_storage
+            .upload(data)
+            .await
+            .context(E::Database)
+            .attach("while uploading asset")?;
+
+        Some(asset_id)
+    }
+    else {
+        None
+    };
 
     match (&new_name, new_avatar) {
         (Some(name), Some(avatar)) => execute!(
@@ -384,6 +401,8 @@ pub async fn update_group_appearance(ctx: &mut EchoContext) -> RouteResult<()> {
         ),
         (None, None) => bail!(E::InvalidData)
     };
+
+    info!("User {user} updated the group's appearance (new name: {new_name:?}, new avatar: {new_avatar:?})");
 
     dispatch_event_for_conversation(
         ctx,
@@ -517,7 +536,7 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
         group_id
     );
 
-    let members = members_data
+    let members: Vec<_> = members_data
         .into_iter()
         .map(|(user_id, joined_at, raw)| GroupMember {
             user_id,
@@ -525,6 +544,8 @@ pub async fn join_group(ctx: &mut EchoContext) -> RouteResult<Group> {
             read_watermark: raw.convert()
         })
         .collect();
+
+    info!("User joined group {name:?} (ID: {group_id}, members: {}) through invite code: {invite_code}", members.len());
 
     let group = Group {
         id: group_id,
@@ -653,6 +674,8 @@ pub async fn add_friend_to_group(ctx: &mut EchoContext) -> RouteResult<()> {
 
     tx.commit().await.context(E::Database)?;
 
+    info!("User added friend {friend_id} to group {group_id}");
+
     dispatch_event_for_conversation(ctx, group_id, Event::MemberJoinedGroup {
         group_id,
         member_id: friend_id
@@ -692,7 +715,11 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
 
     let members = get_group_members(ctx, group_id).await?;
 
+    info!("User left group {group_id}");
+
     if members.is_empty() {
+        info!("Group has no more members, deleting...");
+
         execute!(
             &mut *tx,
             "DELETE FROM conversations WHERE id = $1",
@@ -700,6 +727,8 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         );
     }
     else {
+        info!("Group now has {} members left", members.len());
+
         ctx.dispatcher.dispatch(
             members,
             Event::MemberLeftGroup {
@@ -779,6 +808,8 @@ pub async fn kick_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         member_id
     }).await?;
 
+    info!("User kicked member {member_id} out of group {group_id}");
+
     Ok(())
 }
 
@@ -845,7 +876,7 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         stmt,
         group_id,
         member_id,
-        reason
+        &reason
     );
 
     execute!(
@@ -855,6 +886,8 @@ pub async fn ban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
     );
 
     tx.commit().await.context(E::Database)?;
+
+    info!("User banned member {member_id} from group {group_id} for reason: {reason:?}");
 
     dispatch_event_for_conversation(ctx, group_id, Event::MemberLeftGroup {
         group_id,
@@ -905,6 +938,8 @@ pub async fn unban_group_member(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::Group(G::MemberNotFound));
     }
 
+    info!("User unbanned previous member {member_id} from group {group_id}");
+
     Ok(())
 }
 
@@ -954,6 +989,8 @@ pub async fn rotate_group_invite_code(ctx: &mut EchoContext) -> RouteResult<Grou
         new_invite
     );
 
+    info!("User updated invite code to {new_invite} for group {group_id}");
+
     dispatch_event_for_conversation(
         ctx,
         group_id,
@@ -999,6 +1036,10 @@ pub async fn change_group_lock(ctx: &mut EchoContext) -> RouteResult<()> {
             group_id,
             locked: new_lock_status
         }).await?;
+
+        let verb = if new_lock_status { "locked" } else { "unlocked" };
+
+        info!("User {verb} group {group_id}");
     }
 
     Ok(())
@@ -1134,6 +1175,8 @@ pub async fn create_new_group_emoji(ctx: &mut EchoContext) -> RouteResult<Emoji>
         Event::NewGroupEmoji(emoji.clone())
     ).await?;
 
+    info!("User uploaded new emoji to group {group_id}: {emoji:?}");
+
     Ok(emoji)
 }
 
@@ -1187,6 +1230,8 @@ pub async fn delete_group_emoji(ctx: &mut EchoContext) -> RouteResult<()> {
         group_id,
         Event::GroupEmojiDeleted(emoji_id)
     ).await?;
+
+    info!("User deleted emoji {emoji_id} in group {group_id}");
 
     Ok(())
 }
