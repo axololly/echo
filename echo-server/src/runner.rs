@@ -72,8 +72,6 @@ pub async fn run(
             continue;
         }
 
-        // TODO: check for blacklisted IPs here and refuse any that are
-
         // Ensure the client validates their IP address.
         if !inc.remote_address_validated() {
             inc.retry()?;

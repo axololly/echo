@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, MessageBody, Reaction, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, Reaction, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, postgres::types::PgInterval, prelude::FromRow};
@@ -238,7 +238,7 @@ pub async fn ensure_latest_conversation_session(ctx: &mut EchoContext) -> RouteR
 pub struct SendMessageData {
     pub conversation_id: SnowflakeID,
     pub replied_to: Option<SnowflakeID>,
-    pub message_body: Encrypted<MessageBody>,
+    pub message_body: Encrypted<String>,
     pub key_for_author: Encrypted<Secret>,
     pub key_for_others: MegolmMessage,
     pub delete_after: Option<TimeDelta>
@@ -544,8 +544,6 @@ pub struct UnprocessedMessage {
     pub message_key: MegolmMessage
 }
 
-// TODO: allow the user to customise the page size
-
 #[route("messages.unread.process")]
 pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
     let user_id = ctx.user.unwrap();
@@ -768,7 +766,7 @@ pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
 #[derive(Deserialize, Serialize)]
 pub struct EditMessageData {
     pub message_id: SnowflakeID,
-    pub new_body: Encrypted<MessageBody>
+    pub new_body: Encrypted<String>
 }
 
 #[route("messages.edit")]

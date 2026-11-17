@@ -1,6 +1,4 @@
- -- TODO: add length checks to BYTEA columns
-
- CREATE TYPE "Activity" AS ENUM(
+CREATE TYPE "Activity" AS ENUM(
     'Online',
     'Idle',
     'DoNotDisturb',
@@ -142,7 +140,6 @@ CREATE INDEX idx_messages_delete_at ON messages(delete_at, id);
 
 -- A table containing the message decryption keys
 -- a user has access to
--- (TODO: use this for read receipts?)
 CREATE TABLE message_decryption_keys (
     user_id INT8 REFERENCES users(id)
         ON UPDATE CASCADE
