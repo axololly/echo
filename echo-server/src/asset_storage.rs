@@ -3,21 +3,6 @@ use std::{io::Result, path::PathBuf, sync::Arc};
 use echo_types::AssetID;
 use tokio::fs;
 
-/*
- * TODO: make this also update a table in the database
- * that tracks who uploaded the data, its size, when it
- * was uploaded, and what message/messages it's tied to.
- *
- * Uploading the same file in a different message will
- * just increase the reference counter and not delete it.
- * This will use the same background tasks system as
- * the one for clearing out message keys.
- *
- * Assets that do not have a message tied to them
- * within 10 minutes of being uploaded are automatially
- * deleted.
- */
-
 /// Asset storage that organises its contents on the file system.
 #[derive(Clone)]
 pub struct AssetStorage {

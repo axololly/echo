@@ -4,7 +4,7 @@ use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, p
 
 use chrono::TimeDelta;
 use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddFriendToGroupData, AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData, UpdateReadWatermarkData}, runner::run, stream::Stream};
-use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings};
+use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -252,9 +252,7 @@ async fn send_message(
         stream.send(&SendMessageData {
             conversation_id,
             replied_to: None,
-            message_body: message_secret.encrypt(&MessageBody {
-                content: message.to_string()
-            }),
+            message_body: message_secret.encrypt(&message.to_string()),
             key_for_author: user_secret.encrypt(&message_secret),
             key_for_others: session.encrypt(message_secret),
             delete_after

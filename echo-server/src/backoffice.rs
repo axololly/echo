@@ -39,8 +39,6 @@ pub async fn remove_unused_session_data(ctx: TaskContext) -> Result<()> {
         )
     ";
 
-    // TODO: add check for members older than the message
-    // (check if joined_at < sent_at)
     let clear_megolm_sessions_stmt = "
         DELETE FROM conversation_session_keys AS csk
         WHERE EXISTS (

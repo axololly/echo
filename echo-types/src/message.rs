@@ -13,22 +13,16 @@ pub struct Message {
     pub replied_to: Option<SnowflakeID>,
     pub author: SnowflakeID,
     #[sqlx(rename = "blob")]
-    pub body: Encrypted<MessageBody>,
+    pub body: Encrypted<String>,
     pub sent_at: DateTime<Utc>,
     pub pinned: bool,
     pub attachments: Vec<AssetID>,
     pub delete_at: Option<DateTime<Utc>>
 }
 
-/// The message's content.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct MessageBody { // TODO: see if this can be replaced with just String
-    pub content: String
-}
-
 /// An attachment on a message.
 #[derive(Clone, Deserialize, Serialize)]
-pub struct Attachment { // TODO: make just the data encrypted
+pub struct Attachment {
     pub filename: String,
     pub data: Vec<u8>
 }
