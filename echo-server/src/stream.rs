@@ -3,9 +3,7 @@ use rootcause::{Result, bail, prelude::ResultExt};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::AsyncWriteExt;
 
-use crate::{error::{RouteError, RouteResult}, varint::{AsyncVarintReader, AsyncVarintWriter}};
-
-pub const DATA_TOO_LARGE: VarInt = VarInt::from_u32(100);
+use crate::{error::{DATA_TOO_LARGE, RouteError, RouteResult}, varint::{AsyncVarintReader, AsyncVarintWriter}};
 
 /// A wrapper over a QUIC stream that allows for
 /// sending and receiving complex data structures.

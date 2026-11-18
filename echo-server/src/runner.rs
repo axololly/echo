@@ -1,13 +1,13 @@
-use std::{net::ToSocketAddrs, path::Path, sync::Arc, time::Duration};
+use std::{net::ToSocketAddrs, path::Path, sync::{Arc, LazyLock}, time::Duration};
 
+use dashmap::DashMap;
 use echo_types::SnowflakeID;
-use rootcause::{Result, option_ext::OptionExt};
+use rootcause::{Result, option_ext::OptionExt, prelude::ResultExt};
 use sqlx::postgres::PgPool;
-
 use quinn::{Endpoint, ServerConfig, VarInt, crypto::rustls::QuicServerConfig, rustls::{ServerConfig as RustlsServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}};
 use tokio::sync::Mutex;
 
-use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, events::{EventDispatcher, TypingEventPubSub}, router::{EchoContext, EchoRouter}, stream::Stream};
+use crate::{asset_storage::AssetStorage, backoffice::{RunningTasks, TaskContext, run_all_tasks}, error::ANOTHER_DEVICE_LOGGED_IN, events::{EventDispatcher, TypingEventPubSub}, execute, router::{EchoContext, EchoRouter}, stream::Stream};
 
 /// Run the Echo server.
 ///
@@ -96,6 +96,8 @@ pub async fn run(
     Ok(())
 }
 
+static USER_CONNECTIONS: LazyLock<DashMap<SnowflakeID, quinn::Connection>> = LazyLock::new(DashMap::new);
+
 /// Handle incoming QUIC streams from the parent QUIC [`Connection`],
 /// and then redirecting them through the router.
 ///
@@ -109,14 +111,22 @@ async fn handle_incoming_requests(
     running_tasks: RunningTasks,
     typing_event_pubsub: TypingEventPubSub
 ) -> Result<()> {
+    let client_ip = parent.remote_address();
     let authenticated_user: Arc<Mutex<Option<SnowflakeID>>> = Arc::new(Mutex::new(None));
 
-    loop {
-        let mut stream = Stream::accept_bi(&parent).await?;
+    tokio::spawn(handle_disconnect(
+        parent.clone(),
+        pool.clone(),
+        typing_event_pubsub.clone(),
+        authenticated_user.clone()
+    ));
+
+    while let Ok(mut stream) = Stream::accept_bi(&parent).await {
+        let user_before_request = *authenticated_user.lock().await;
 
         let route_name: String = stream.receive().await?;
 
-        let mut ctx = EchoContext {
+        let ctx = EchoContext {
             route_name,
             stream,
             dispatcher: dispatcher.clone(),
@@ -127,28 +137,100 @@ async fn handle_incoming_requests(
             typing_event_pubsub: typing_event_pubsub.clone()
         };
 
-        let authenticated_user = authenticated_user.clone();
-        let router = router.clone();
+        // let authenticated_user = authenticated_user.clone();
+        // let router = router.clone();
 
         // Make a new task for each request that gets handled.
         // This is to allow multiple requests to be handled at the same time.
-        tokio::spawn(async move {
-            let result = router.run_with(&mut ctx).await;
+        tokio::spawn(handle_single_request(
+            ctx,
+            router.clone(),
+            authenticated_user.clone()
+        ));
 
-            if let Err(report) = &result {
-                // For debug purposes
-                println!("Error encountered on server: {report:?}");
+        let user_after_request = *authenticated_user.lock().await;
+
+        if user_before_request != user_after_request
+            && let Some(user_id) = user_after_request
+        {
+            let prev_conn = USER_CONNECTIONS.insert(user_id, parent.clone());
+
+            if let Some(conn) = prev_conn {
+                conn.close(
+                    ANOTHER_DEVICE_LOGGED_IN,
+                    format!("Another device logged in to this account under the IP {client_ip}").as_bytes()
+                );
             }
-
-            let stripped = result.map_err(|report| report.into_current_context());
-
-            let _ = ctx.stream.send(&stripped).await;
-
-            let mut auth_user = authenticated_user.lock().await;
-
-            if ctx.user != *auth_user {
-                *auth_user = ctx.user;
-            }
-        });
+        }
     }
+
+    Ok(())
+}
+
+async fn handle_single_request(
+    mut ctx: EchoContext,
+    router: Arc<EchoRouter>,
+    authenticated_user: Arc<Mutex<Option<SnowflakeID>>>
+) -> Result<()> {
+    let result = router.run_with(&mut ctx).await;
+
+    if let Err(report) = &result {
+        // For debug purposes
+        println!("Error encountered on server: {report:?}");
+    }
+
+    let stripped = result.map_err(|report| report.into_current_context());
+
+    let _ = ctx.stream.send(&stripped).await;
+
+    let mut auth_user = authenticated_user.lock().await;
+
+    if ctx.user != *auth_user && let Some(user_id) = ctx.user {
+        if let Ok(mut tx) = ctx.pool.begin().await {
+            execute!(
+                &mut *tx,
+                "UPDATE users SET status = 'Online' WHERE id = $1",
+                user_id
+            );
+
+            if let Some(prev) = *auth_user {
+                execute!(
+                    &mut *tx,
+                    "UPDATE users SET status = 'Offline' WHERE id = $1",
+                    prev
+                );
+            }
+
+            let _ = tx.commit().await;
+        }
+
+        *auth_user = ctx.user;
+    }
+
+    Ok(())
+}
+
+async fn handle_disconnect(
+    conn: quinn::Connection,
+    pool: PgPool,
+    typing_event_pubsub: TypingEventPubSub,
+    authenticated_user: Arc<Mutex<Option<SnowflakeID>>>
+) -> Result<()> {
+    conn.closed().await;
+
+    let Some(user_id) = *authenticated_user.lock().await else {
+        return Ok(());
+    };
+
+    typing_event_pubsub.unsubscribe(user_id);
+
+    USER_CONNECTIONS.remove(&user_id);
+
+    execute!(
+        &pool,
+        "UPDATE users SET status = 'Offline' WHERE id = $1",
+        user_id
+    );
+
+    Ok(())
 }

@@ -1,3 +1,4 @@
+use quinn::VarInt;
 use rootcause::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -40,3 +41,9 @@ pub enum RouteError {
 }
 
 pub type RouteResult<T> = Result<T, RouteError>;
+
+/// Too much data was sent by the client, causing the server to close the stream.
+pub const DATA_TOO_LARGE: VarInt = VarInt::from_u32(100);
+
+/// Another user logged in from another location.
+pub const ANOTHER_DEVICE_LOGGED_IN: VarInt = VarInt::from_u32(101);
