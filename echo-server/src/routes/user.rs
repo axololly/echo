@@ -9,7 +9,7 @@ use sqlx::prelude::FromRow;
 use structdiff::StructDiff;
 use thiserror::Error;
 
-use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_as, fetch_one_scalar, fetch_opt, fetch_opt_as, fetch_opt_scalar, route, router::EchoContext};
+use crate::{error::{RouteError as E, RouteResult}, events::Event, execute, exists, fetch_all_as, fetch_one_as, fetch_opt, fetch_opt_as, fetch_opt_scalar, ok, route, router::EchoContext};
 
 /// An error related to users.
 #[derive(Clone, Copy, Debug, Deserialize, Error, Serialize)]
@@ -41,15 +41,34 @@ use UserRouteError as U;
 #[route("login")]
 #[no_auth]
 pub async fn login(ctx: &mut EchoContext) -> RouteResult<()> {
+    let username: String = ctx.stream.receive().await?;
+
+    let stmt = "
+        SELECT
+            u.id,
+            uei.encrypted_secret,
+            upk.signature_verifier
+        FROM users u
+        INNER JOIN users_public_keys upk
+            ON u.id = upk.user_id
+        INNER JOIN users_encrypted_info uei
+            ON u.id = uei.user_id
+        WHERE u.name = $1
+    ";
+
+    let account_data: (SnowflakeID, PasswordProtected<Secret>, SignatureVerifier) = fetch_opt_as!(
+        &ctx.pool,
+        stmt,
+        &username
+    ).context(E::User(U::NotFound))?;
+
+    let (user_id, secret, SignatureVerifier(verifying_key)) = account_data;
+
+    ctx.stream.send(ok!((user_id, secret))).await?;
+
     let signed_id: Signed<SnowflakeID> = ctx.stream.receive().await?;
 
-    let SignatureVerifier(verifying_key) = fetch_one_scalar!(
-        &ctx.pool,
-        "SELECT signature_verifier FROM users_public_keys WHERE user_id = $1",
-        *signed_id
-    );
-
-    if signed_id.verify(verifying_key) {
+    if signed_id.verify(verifying_key) && user_id == *signed_id {
         ctx.user = Some(*signed_id);
     }
     else {
@@ -238,6 +257,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
 
     tx.commit().await.context(E::Database)?;
 
+    ctx.user = Some(user.id);
+
     Ok(user)
 }
 
@@ -303,8 +324,7 @@ pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
             activity = $5,
             about_me = $6,
             status = $7,
-            encrypted_secret = $8,
-            encrypted_state = $9
+            show_in_searches = $8
         WHERE id = $1
     ";
 
@@ -317,7 +337,8 @@ pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
         &new.avatar,
         &new.activity,
         &new.about_me,
-        &new.status
+        &new.status,
+        &new.show_in_searches
     );
 
     ctx.profile_update_pubsub.publish(ctx.user.unwrap());
