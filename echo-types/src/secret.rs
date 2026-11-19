@@ -34,18 +34,12 @@ impl Secret {
     }
 
     /// Encrypt some data using this [`Secret`] as a key.
-    pub fn encrypt<T>(&self, value: &T) -> Encrypted<T>
-    where
-        T: Serialize + DeserializeOwned
-    {
+    pub fn encrypt<T: Serialize>(&self, value: &T) -> Encrypted<T> {
         Encrypted::encrypt_with_key(value, self.0)
     }
 
     /// Decrypt some [`Encrypted`] data using this [`Secret`] as a key.
-    pub fn decrypt<T>(&self, enc: &Encrypted<T>) -> DecryptionResult<T>
-    where
-        T: Serialize + DeserializeOwned
-    {
+    pub fn decrypt<T: DeserializeOwned>(&self, enc: &Encrypted<T>) -> DecryptionResult<T> {
         enc.decrypt(self.0)
     }
 
@@ -71,11 +65,11 @@ impl Secret {
     }
 
     /// Open a [`CryptoBox`] using this [`Secret`].
-    pub fn unbox_from<T>(&self, crypto_box: &CryptoBox<T>, public_key: BoxPublicKey) -> DecryptionResult<T>
+    pub fn unbox<T>(&self, crypto_box: &CryptoBox<T>) -> DecryptionResult<T>
     where
         T: Serialize + DeserializeOwned
     {
-        crypto_box.decrypt(public_key, *self)
+        crypto_box.decrypt(*self)
     }
 
     /// Try to convert a byte string into a [`Secret`].
@@ -188,7 +182,7 @@ pub enum DecryptionError {
 
 pub type DecryptionResult<T> = Result<T, DecryptionError>;
 
-impl<T: Serialize + DeserializeOwned> Encrypted<T> {
+impl<T: Serialize> Encrypted<T> {
     /// Encrypts some data using a random key, then returns
     /// the [`Encrypted`] instance and the key used for the
     /// encryption.
@@ -235,7 +229,9 @@ impl<T: Serialize + DeserializeOwned> Encrypted<T> {
             _data: PhantomData,
         }
     }
+}
 
+impl<T: DeserializeOwned> Encrypted<T> {
     /// Decrypt and deserialise this [`Encrypted`] wrapper to yield
     /// an owned `T` or an error.
     pub fn decrypt(&self, key: EncryptionKey) -> DecryptionResult<T> {
@@ -502,8 +498,10 @@ impl<T> Deref for Signed<T> {
     }
 }
 
+pub const CRYPTO_BOX_PUBLIC_KEY_SIZE: usize = 32;
+
 #[derive(Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, Hash, PartialEq, Serialize)]
-pub struct BoxPublicKey([u8; 32]);
+pub struct BoxPublicKey([u8; CRYPTO_BOX_PUBLIC_KEY_SIZE]);
 
 impl From<BoxPublicKey> for crypto_box::PublicKey {
     fn from(value: BoxPublicKey) -> Self {
@@ -536,6 +534,7 @@ impl sqlx::Type<sqlx::Postgres> for BoxPublicKey {
 pub struct CryptoBox<T> {
     payload: Vec<u8>,
     nonce: [u8; NONCE_SIZE],
+    sender_public_key: BoxPublicKey,
     _data: PhantomData<T>
 }
 
@@ -564,19 +563,16 @@ impl<T: Serialize + DeserializeOwned> CryptoBox<T> {
         Self {
             payload,
             nonce,
+            sender_public_key: sender_secret.into(),
             _data: PhantomData
         }
     }
 
     /// Decrypt this box using the sender's public key
     /// and the recipient's secret.
-    pub fn decrypt(
-        &self,
-        sender_public_key: BoxPublicKey,
-        receiver_secret: Secret
-    ) -> DecryptionResult<T> {
+    pub fn decrypt(&self, receiver_secret: Secret) -> DecryptionResult<T> {
         let chacha_box = ChaChaBox::new(
-            &sender_public_key.into(),
+            &self.sender_public_key.into(),
             &receiver_secret.0.into()
         );
 
@@ -598,12 +594,14 @@ impl<T: Serialize + DeserializeOwned> CryptoBox<T> {
         let CryptoBox {
             payload,
             nonce,
+            sender_public_key,
             _data
         } = self;
 
         CryptoBox {
             payload,
             nonce,
+            sender_public_key,
             _data: PhantomData
         }
     }
@@ -622,6 +620,7 @@ impl<T> Encode<'_, sqlx::Postgres> for CryptoBox<T> {
         &self,
         buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
     ) -> StdResult<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(&self.sender_public_key.0);
         buf.extend_from_slice(&self.nonce);
         buf.extend_from_slice(&self.payload);
 
@@ -633,15 +632,21 @@ impl<T> Decode<'_, sqlx::Postgres> for CryptoBox<T> {
     fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'_>) -> StdResult<Self, sqlx::error::BoxDynError> {
         let bytes = value.as_bytes()?;
 
+        let Some((sender_pk, bytes)) = bytes.split_at_checked(CRYPTO_BOX_PUBLIC_KEY_SIZE) else {
+            bail!("output was too short to be decoded");
+        };
+
         let Some((nonce, payload)) = bytes.split_at_checked(NONCE_SIZE) else {
             bail!("output was too short to be decoded");
         };
 
-        let nonce = nonce.try_into().unwrap();
+        let nonce = nonce.try_into()?;
+        let sender_public_key = BoxPublicKey(sender_pk.try_into()?);
 
         Ok(Self {
             payload: payload.to_vec(),
             nonce,
+            sender_public_key,
             _data: PhantomData
         })
     }
@@ -651,16 +656,4 @@ impl<T> sqlx::Type<sqlx::Postgres> for CryptoBox<T> {
     fn type_info() -> PgTypeInfo {
         <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
     }
-}
-
-/// THIS IS NOT FOR REGULAR USE
-///
-/// Rust doesn't allow inspecting private fields
-/// outside of this crate, so use this to convert
-/// an [`Encrypted`] into a [`CryptoBox`] of the
-/// same type.
-pub fn __convert_encrypted_to_crypto_box<T>(enc: Encrypted<T>) -> CryptoBox<T> {
-    let Encrypted { payload, nonce, _data } = enc;
-
-    CryptoBox { payload, nonce, _data }
 }

@@ -4,8 +4,8 @@ use tracing::info;
 
 use crate::{error::{RouteError as E, RouteResult}, route, router::EchoContext};
 
-#[route("assets.fetch")]
-pub async fn fetch_asset(ctx: &mut EchoContext) -> RouteResult<Option<Vec<u8>>> {
+#[route("assets.get")] // TODO: allow for seeking and reading specific amounts
+pub async fn get_asset(ctx: &mut EchoContext) -> RouteResult<Option<Vec<u8>>> {
     let id: AssetID = ctx.stream.receive().await?;
 
     info!("User is trying to fetch asset with ID {id}");
@@ -25,4 +25,9 @@ pub async fn fetch_asset(ctx: &mut EchoContext) -> RouteResult<Option<Vec<u8>>> 
     }
 
     Ok(asset)
+}
+
+#[route("ping")]
+pub async fn ping(ctx: &mut EchoContext) -> RouteResult<()> {
+    Ok(())
 }

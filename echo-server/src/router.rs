@@ -66,11 +66,9 @@ impl EchoRouter {
         // User routes
         router.register_route(login);
         router.register_route(get_user);
-        router.register_route(get_user_public_keys);
-        router.register_route(get_user_encrypted_info);
+        router.register_route(change_password);
         router.register_route(create_new_user);
         router.register_route(update_user_profile);
-        router.register_route(update_user_encrypted_info);
         router.register_route(subscribe_to_profile_updates);
         router.register_route(unsubscribe_from_profile_updates);
         router.register_route(unsubscribe_from_all_profile_updates);
@@ -110,7 +108,8 @@ impl EchoRouter {
         router.register_route(ensure_latest_conversation_session);
         router.register_route(send_message);
         router.register_route(get_message_history);
-        router.register_route(process_unread_messages);
+        router.register_route(process_one_unread_message);
+        router.register_route(process_unread_messages_in_bulk);
         router.register_route(update_pin_status_on_message);
         router.register_route(get_all_pinned_message_ids);
         router.register_route(get_message);
@@ -118,7 +117,6 @@ impl EchoRouter {
         router.register_route(delete_message);
         router.register_route(add_new_reaction);
         router.register_route(remove_reaction);
-        router.register_route(get_message_reactions);
         router.register_route(update_read_watermark);
 
         // Conversation routes
@@ -128,8 +126,9 @@ impl EchoRouter {
         router.register_route(unsubscribe_from_all_typing_events);
         router.register_route(start_typing_in_conversation);
 
-        // Asset route
-        router.register_route(fetch_asset);
+        // Miscellaneous routes
+        router.register_route(get_asset);
+        router.register_route(ping);
 
         router
     }

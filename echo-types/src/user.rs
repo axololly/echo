@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Decode, Encode, postgres::PgTypeInfo, prelude::FromRow};
+use sqlx::{Decode, Encode, Row, postgres::{PgRow, PgTypeInfo}, prelude::FromRow};
 use structdiff::{Difference, StructDiff};
 
-use crate::{AssetID, BoxPublicKey, Encrypted, PasswordProtected, Secret, SignatureVerifier, SnowflakeID};
+use crate::{AssetID, BoxPublicKey, SnowflakeID};
 
 /// The activity status of a given user.
 #[derive(Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -20,33 +20,9 @@ impl sqlx::Type<sqlx::Postgres> for Activity {
     }
 }
 
-/// The client-side settings a user has on their account.
-///
-/// These are stored encrypted on the server and fetched
-/// when necessary.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UserSettings {
-    /// How long in seconds after going inactive
-    /// before a user is logged out.
-    pub logout_after: u64,
-
-    /// Whether or not to send typing indicators
-    /// to the server.
-    pub enable_typing_indicators: bool,
-
-    /// Whether or not to send read receipts to
-    /// the server.
-    pub enable_read_receipts: bool,
-
-    /// Who to automatically reject future friend
-    /// requests from.
-    pub ignore_future_requests_from: Vec<SnowflakeID>
-}
-
 /// An Echo user.
 ///
-/// Their public key information can be found in [`UserPublicKeys`],
-/// and their encrypted information can be found in [`UserEncryptedInfo`].
+/// Their cryptographic information can be found in [`EchoCryptoInfo`].
 #[derive(Clone, Debug, Deserialize, Difference, Eq, FromRow, PartialEq, Serialize)]
 pub struct User {
     pub id: SnowflakeID,
@@ -56,29 +32,11 @@ pub struct User {
     pub activity: Activity,
     pub status: String,
     pub about_me: String,
-    pub show_in_searches: bool
+    pub show_in_searches: bool,
+    pub box_public_key: BoxPublicKey
 }
 
 pub type UserDiff = <User as StructDiff>::Diff;
-
-/// A user's secret cryptographic information.
-#[derive(Clone, Debug, Deserialize, Difference, Eq, FromRow, PartialEq, Serialize)]
-pub struct UserEncryptedInfo {
-    #[sqlx(rename = "encrypted_secret")]
-    pub secret: PasswordProtected<Secret>,
-
-    #[sqlx(rename = "encrypted_state")]
-    pub settings: Encrypted<UserSettings>
-}
-
-pub type UserEncryptedInfoDiff = <UserEncryptedInfo as StructDiff>::Diff;
-
-/// A user's public key information.
-#[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
-pub struct UserPublicKeys {
-    pub signature_verifier: SignatureVerifier,
-    pub box_public_key: BoxPublicKey
-}
 
 /// Read watermark for a conversation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize, sqlx::Type)]
@@ -111,6 +69,29 @@ impl SqlxReadWatermark {
     }
 }
 
+/// A read watermark for a DM.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReadWatermarks {
+    pub ours: Option<ReadWatermark>,
+    pub theirs: Option<ReadWatermark>
+}
+
+impl<'r> FromRow<'r, PgRow> for ReadWatermarks {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        let ours = SqlxReadWatermark {
+            last_message_id_read: row.try_get("ours_last_message_id_read")?,
+            last_message_read_at: row.try_get("ours_last_message_read_at")?
+        }.convert();
+
+        let theirs = SqlxReadWatermark {
+            last_message_id_read: row.try_get("theirs_last_message_id_read")?,
+            last_message_read_at: row.try_get("theirs_last_message_read_at")?
+        }.convert();
+
+        Ok(Self { ours, theirs })
+    }
+}
+
 /// A user's friend, containing the friend's user ID
 /// and when they first became friends.
 #[derive(Clone, Copy, Debug, Deserialize, FromRow, Serialize)]
@@ -118,12 +99,27 @@ pub struct Friend {
     pub user_id: SnowflakeID,
     pub friends_since: DateTime<Utc>,
     pub conversation_id: SnowflakeID,
-    pub read_watermark: Option<ReadWatermark>
+    #[sqlx(flatten)]
+    pub read_watermarks: ReadWatermarks
 }
 
-/// A request to become friends with another user.
+/// A friend request from another user.
 #[derive(Clone, Copy, Debug, Deserialize, FromRow, Serialize)]
-pub struct FriendRequest {
+pub struct IncomingFriendRequest {
     pub sender: SnowflakeID,
     pub sent_at: DateTime<Utc>
+}
+
+/// A friend request sent by a user.
+#[derive(Clone, Copy, Debug, Deserialize, FromRow, Serialize)]
+pub struct OutgoingFriendRequest {
+    pub receiver: SnowflakeID,
+    pub sent_at: DateTime<Utc>
+}
+
+/// A set of incoming and outgoing friend requests for a user.
+#[derive(Clone, Debug, Deserialize, FromRow, Serialize)]
+pub struct FriendRequests {
+    pub incoming: Vec<IncomingFriendRequest>,
+    pub outgoing: Vec<OutgoingFriendRequest>
 }

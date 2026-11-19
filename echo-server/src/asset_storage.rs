@@ -39,6 +39,29 @@ impl AssetStorage {
         Ok(Some(data))
     }
 
+    /// Try to get the size of a stored asset,
+    /// returning `None` if it could not be found.
+    pub async fn try_get_size(&self, id: AssetID) -> Result<Option<u64>> {
+        let hex = id.to_string();
+
+        let (parent, child) = hex.split_at(2);
+
+        let path = self
+            .root_dir
+            .join(parent)
+            .join(child);
+
+        let exists = fs::try_exists(&path).await?;
+
+        if !exists {
+            return Ok(None);
+        }
+
+        let meta = fs::metadata(&path).await?;
+
+        Ok(Some(meta.len()))
+    }
+
     /// Upload some data to asset storage and return the ID
     /// used to fetch it again.
     pub async fn upload(&self, data: impl AsRef<[u8]> + Send) -> Result<AssetID> {

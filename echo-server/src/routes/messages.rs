@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use echo_types::{__convert_encrypted_to_crypto_box, AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, Reaction, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage};
+use echo_types::{AssetID, Attachment, BoxPublicKey, Compressable, Compressed, CryptoBox, Encrypted, Message, Reaction, SNOWFLAKE_GEN, Secret, SnowflakeID, SqlxMegolmMessage, UploadedAttachment};
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, postgres::types::PgInterval, prelude::FromRow};
@@ -54,17 +54,8 @@ async fn is_part_of_conversation(
     Ok(is_member)
 }
 
-/// A single conversation member's session,
-/// packaging their outbound session and
-/// the inbound sessions of all other members.
-#[derive(Deserialize, Serialize)]
-pub struct EncryptedChatSession {
-    pub outbound: Encrypted<GroupSessionPickle>,
-    pub inbounds: HashMap<SnowflakeID, CryptoBox<SessionKey>>
-}
-
 #[route("messages.sessions.get")]
-pub async fn get_latest_conversation_session(ctx: &mut EchoContext) -> RouteResult<EncryptedChatSession> {
+pub async fn get_latest_conversation_session(ctx: &mut EchoContext) -> RouteResult<Encrypted<GroupSessionPickle>> {
     let conversation_id: SnowflakeID = ctx.stream.receive().await?;
 
     if !is_part_of_conversation(ctx, conversation_id).await? {
@@ -74,49 +65,34 @@ pub async fn get_latest_conversation_session(ctx: &mut EchoContext) -> RouteResu
     let user_id = ctx.user.unwrap();
 
     let stmt = "
-        SELECT
-            csk.receiver,
-            csk.blob
+        SELECT csk.blob
         FROM conversation_session_keys csk
         INNER JOIN conversations c
             ON c.id = csk.conversation_id
             AND c.epoch = csk.epoch
         WHERE c.id = $1
         AND csk.sender = $2
+        AND csk.receiver = $3
     ";
 
-    let rows: Vec<(SnowflakeID, Encrypted<GroupSessionPickle>)> = fetch_all_as!(
+    let maybe_session = fetch_opt_scalar!(
         &ctx.pool,
         stmt,
         conversation_id,
         user_id
     );
 
-    let mut outbound = None;
+    maybe_session
+        .context(E::Messages(M::ConversationNotFound))
+}
 
-    let mut inbounds = HashMap::new();
-
-    for (receiver, enc) in rows {
-        if receiver == user_id {
-            outbound = Some(enc);
-        }
-        else {
-            let session_key = __convert_encrypted_to_crypto_box(enc)
-                .cast::<SessionKey>();
-
-            inbounds.insert(receiver, session_key);
-        }
-    }
-
-    let outbound = outbound
-        .context(E::Messages(M::ConversationNotFound))?;
-
-    let session = EncryptedChatSession {
-        outbound,
-        inbounds
-    };
-
-    Ok(session)
+/// A single conversation member's session,
+/// packaging their outbound session and
+/// the inbound sessions of all other members.
+#[derive(Deserialize, Serialize)]
+pub struct EncryptedChatSession {
+    pub outbound: Encrypted<GroupSessionPickle>,
+    pub inbounds: HashMap<SnowflakeID, CryptoBox<SessionKey>>
 }
 
 #[route("messages.sessions.ensure")]
@@ -160,7 +136,7 @@ pub async fn ensure_latest_conversation_session(ctx: &mut EchoContext) -> RouteR
             cm.user_id,
             upk.box_public_key
         FROM conversation_members cm
-        INNER JOIN users_public_keys upk
+        INNER JOIN users_crypto_info upk
             ON upk.user_id = cm.user_id
         WHERE cm.conversation_id = $1
         AND cm.user_id != $2
@@ -297,9 +273,9 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
     ctx.stream.send(ok!(())).await?;
 
     // 250MB limit
-    let attachments: Vec<Encrypted<Attachment>> = ctx.stream.receive_capped(250_000_000).await?;
+    let uploaded_attachments: Vec<UploadedAttachment> = ctx.stream.receive_capped(250_000_000).await?;
 
-    if attachments.len() > 20 {
+    if uploaded_attachments.len() > 20 {
         bail!(E::InvalidData);
     }
 
@@ -335,10 +311,10 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         delete_at
     );
 
-    let mut attachment_ids = vec![];
+    let mut attachments = vec![];
 
-    for attachment in attachments {
-        let attachment_data = bitcode::serialize(&attachment)
+    for attachment in uploaded_attachments {
+        let attachment_data = bitcode::serialize(&attachment.data)
             .context(E::InvalidData)?;
 
         let asset_id = ctx
@@ -348,14 +324,18 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
             .context(E::Database)
             .attach("while uploading data to asset storage")?;
 
-        attachment_ids.push(asset_id);
-
         execute!(
             &mut *tx,
-            "INSERT INTO message_attachments (message_id, asset_id) VALUES ($1, $2)",
+            "INSERT INTO message_attachments (message_id, filename, asset_id) VALUES ($1, $2, $3)",
             message_id,
+            &attachment.filename,
             asset_id
         );
+
+        attachments.push(Attachment {
+            filename: attachment.filename,
+            asset_id
+        });
     }
 
     let stmt = "
@@ -416,8 +396,9 @@ pub async fn send_message(ctx: &mut EchoContext) -> RouteResult<Message> {
         body: message_body,
         sent_at: Utc::now(),
         pinned: false,
-        attachments: attachment_ids,
-        delete_at
+        attachments,
+        delete_at,
+        reactions: vec![]
     })
 }
 
@@ -466,8 +447,30 @@ pub async fn get_message_history(ctx: &mut EchoContext) -> RouteResult<Compresse
     let base = r#"
         SELECT
             msg.*,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'filename', ma.filename,
+                        'asset_id', ma.asset_id
+                    )
+                ) FILTER (WHERE ma.message_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS "attachments",
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'emoji', mr.emoji_id,
+                        'author', mr.author
+                    )
+                ) FILTER (WHERE mr.message_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS "reactions",
             mdk.blob AS "secret"
         FROM messages msg
+        LEFT JOIN message_attachments ma
+            ON msg.id = ma.message_id
+        LEFT JOIN message_reactions mr
+            ON msg.id = mr.message_id
         INNER JOIN message_decryption_keys mdk
             ON mdk.message_id = msg.id
     "#;
@@ -539,20 +542,18 @@ pub async fn get_message_history(ctx: &mut EchoContext) -> RouteResult<Compresse
 /// and then reupload them.
 #[derive(Deserialize, Serialize)]
 pub struct UnprocessedMessage {
-    pub box_public_key: BoxPublicKey,
     pub session_key: CryptoBox<SessionKey>,
     pub message_key: MegolmMessage
 }
 
-#[route("messages.unread.process")]
-pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
+#[route("messages.unread.process.bulk")]
+pub async fn process_unread_messages_in_bulk(ctx: &mut EchoContext) -> RouteResult<()> {
     let user_id = ctx.user.unwrap();
     let per_page: i64 = 50;
 
     let stmt = "
         SELECT
             msg.id AS message_id,
-            upk.box_public_key AS author_public_key,
             csk.blob AS encrypted_session_key,
             pmk.blob AS megolm_key_message
         FROM pending_message_keys pmk
@@ -562,7 +563,7 @@ pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
             ON csk.conversation_id = msg.conversation_id
             AND csk.epoch = pmk.epoch
             AND csk.sender = msg.author
-        INNER JOIN users_public_keys upk
+        INNER JOIN users_crypto_info upk
             ON upk.user_id = msg.author
         WHERE csk.receiver = $1
         AND msg.id < $2
@@ -580,7 +581,6 @@ pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
     loop {
         let rows: Vec<(
             SnowflakeID,
-            BoxPublicKey,
             CryptoBox<SessionKey>,
             SqlxMegolmMessage
         )> = fetch_all_as!(
@@ -597,8 +597,7 @@ pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
 
         let unprocessed_messages: HashMap<SnowflakeID, UnprocessedMessage> = rows
             .into_iter()
-            .map(|(id, bpk, sk, msg)| (id, UnprocessedMessage {
-                box_public_key: bpk,
+            .map(|(id, sk, msg)| (id, UnprocessedMessage {
                 session_key: sk,
                 message_key: msg.into()
             }))
@@ -636,6 +635,89 @@ pub async fn process_unread_messages(ctx: &mut EchoContext) -> RouteResult<()> {
 
         tx.commit().await.context(E::Database)?;
     }
+
+    Ok(())
+}
+
+#[route("messages.unread.process.one")]
+pub async fn process_one_unread_message(ctx: &mut EchoContext) -> RouteResult<()> {
+    let user_id = ctx.user.unwrap();
+    let message_id: SnowflakeID = ctx.stream.receive().await?;
+
+    let stmt = "
+        SELECT 1 FROM message_decryption_keys
+        WHERE user_id = $1
+        AND message_id = $2
+    ";
+
+    let already_processed = exists!(
+        &ctx.pool,
+        stmt,
+        user_id,
+        message_id
+    );
+
+    if already_processed {
+        ctx.stream.send(ok!(None::<()>)).await?;
+
+        return Ok(());
+    }
+
+    let stmt = "
+        SELECT
+            csk.blob AS encrypted_session_key,
+            pmk.blob AS megolm_key_message
+        FROM pending_message_keys pmk
+        INNER JOIN messages msg
+            ON msg.id = pmk.message_id
+        INNER JOIN conversation_session_keys csk
+            ON csk.conversation_id = msg.conversation_id
+            AND csk.epoch = pmk.epoch
+            AND csk.sender = msg.author
+        INNER JOIN users_crypto_info upk
+            ON upk.user_id = msg.author
+        WHERE csk.receiver = $1
+        AND msg.id = $2
+    ";
+
+    let maybe_data: Option<(
+        CryptoBox<SessionKey>,
+        SqlxMegolmMessage
+    )> = fetch_opt_as!(
+        &ctx.pool,
+        stmt,
+        user_id,
+        message_id
+    );
+
+    let unprocessed_message = maybe_data.map(|(sk, msg)| UnprocessedMessage {
+        session_key: sk,
+        message_key: msg.into()
+    });
+
+    ctx.stream.send(ok!(unprocessed_message)).await?;
+
+    if unprocessed_message.is_none() {
+        return Ok(());
+    }
+
+    let maybe_message_secret: Option<Encrypted<Secret>> = ctx.stream.receive().await?;
+
+    let Some(message_secret) = maybe_message_secret else {
+        info!("User was unable to process data for message with ID {message_id}");
+
+        return Ok(());
+    };
+
+    info!("User processed data for message with ID {message_id}");
+
+    execute!(
+        &ctx.pool,
+        "INSERT INTO message_decryption_keys (user_id, message_id, blob) VALUES ($1, $2, $3)",
+        user_id,
+        message_id,
+        message_secret
+    );
 
     Ok(())
 }
@@ -693,6 +775,7 @@ pub async fn update_pin_status_on_message(ctx: &mut EchoContext) -> RouteResult<
     if new_pin_status != old_pin_status {
         dispatch_event_for_conversation(ctx, conversation_id, Event::MessagePinStatusUpdated {
             message_id,
+            conversation_id,
             pinned: true
         }).await?;
 
@@ -727,7 +810,7 @@ pub async fn get_all_pinned_message_ids(ctx: &mut EchoContext) -> RouteResult<Co
 }
 
 #[route("messages.get")]
-pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
+pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<(Message, Encrypted<Secret>)> {
     let message_id: SnowflakeID = ctx.stream.receive().await?;
 
     let conversation_id = fetch_opt_scalar!(
@@ -743,15 +826,36 @@ pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
     let stmt = r#"
         SELECT
             msg.*,
-            ARRAY(
-                SELECT asset_id FROM message_attachments
-                WHERE message_id = msg.id
-            ) AS "attachments"
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'filename', ma.filename,
+                        'asset_id', ma.asset_id
+                    )
+                ) FILTER (WHERE ma.message_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS "attachments",
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'emoji', mr.emoji_id,
+                        'author', mr.author
+                    )
+                ) FILTER (WHERE mr.message_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS "reactions",
+            mdk.blob AS "secret"
         FROM messages msg
+        LEFT JOIN message_attachments ma
+            ON msg.id = ma.message_id
+        LEFT JOIN message_reactions mr
+            ON msg.id = mr.message_id
+        INNER JOIN message_decryption_keys mdk
+            ON mdk.message_id = msg.id
         WHERE msg.id = $1
     "#;
 
-    let message: Message = fetch_one_as!(
+    let MessageAndSecret { message, secret } = fetch_one_as!(
         &ctx.pool,
         stmt,
         message_id
@@ -759,7 +863,7 @@ pub async fn get_message(ctx: &mut EchoContext) -> RouteResult<Message> {
 
     info!("User fetched individual message with ID {message_id} in conversation {conversation_id}");
 
-    Ok(message)
+    Ok((message, secret))
 }
 
 /// Data relating to editing a message.
@@ -796,7 +900,7 @@ pub async fn edit_message(ctx: &mut EchoContext) -> RouteResult<()> {
         &ctx.pool,
         "UPDATE messages SET blob = $2 WHERE id = $1",
         message_id,
-        new_body
+        &new_body
     );
 
     info!("User edited message with ID {message_id} in conversation {conversation_id}");
@@ -806,7 +910,8 @@ pub async fn edit_message(ctx: &mut EchoContext) -> RouteResult<()> {
         conversation_id,
         Event::MessageEdited {
             conversation_id,
-            message_id
+            message_id,
+            new_body
         }
     ).await?;
 
@@ -941,10 +1046,13 @@ pub async fn add_new_reaction(ctx: &mut EchoContext) -> RouteResult<()> {
     dispatch_event_for_conversation(
         ctx,
         conversation_id,
-        Event::NewReactionAdded {
+        Event::MessageReactionUpdate {
             message_id,
-            author,
-            emoji_id
+            reaction: Reaction {
+                author,
+                emoji: emoji_id
+            },
+            exists: true
         }
     ).await?;
 
@@ -997,50 +1105,17 @@ pub async fn remove_reaction(ctx: &mut EchoContext) -> RouteResult<()> {
     dispatch_event_for_conversation(
         ctx,
         conversation_id,
-        Event::ReactionRemoved {
+        Event::MessageReactionUpdate {
             message_id,
-            author,
-            emoji_id
+            reaction: Reaction {
+                author,
+                emoji: emoji_id
+            },
+            exists: false
         }
     ).await?;
 
     Ok(())
-}
-
-#[route("messages.reactions.get")]
-pub async fn get_message_reactions(ctx: &mut EchoContext) -> RouteResult<Vec<Reaction>> {
-    let message_id: SnowflakeID = ctx.stream.receive().await?;
-
-    let conversation_id = fetch_opt_scalar!(
-        &ctx.pool,
-        "SELECT conversation_id FROM messages WHERE id = $1",
-        message_id
-    ).context(E::Messages(M::MessageNotFound))?;
-
-    if !is_part_of_conversation(ctx, conversation_id).await? {
-        bail!(E::Messages(M::MessageNotFound));
-    }
-
-    let stmt = "
-        SELECT
-            r.message_id,
-            r.author,
-            e.*
-        FROM message_reactions r
-        INNER JOIN group_emojis e
-            ON r.emoji_id = e.id
-        WHERE r.message_id = $1
-    ";
-
-    let reactions: Vec<Reaction> = fetch_all_as!(
-        &ctx.pool,
-        stmt,
-        message_id
-    );
-
-    info!("User fetched reactions on message {message_id} in conversation {conversation_id}");
-
-    Ok(reactions)
 }
 
 #[derive(Deserialize, Serialize)]

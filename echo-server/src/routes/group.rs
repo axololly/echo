@@ -41,6 +41,9 @@ pub enum GroupRouteError {
     #[error("no megolm session for this epoch")]
     NoMegolmSession,
 
+    #[error("emoji with that name already taken")]
+    EmojiNameTaken,
+
     #[error("emoji not found")]
     EmojiNotFound,
 
@@ -341,7 +344,7 @@ async fn get_group_owner(
 /// If both `new_name` and `new_avatar` are set to
 /// `None`, then this will return `InvalidData`.
 #[derive(Deserialize, Serialize)]
-pub struct GroupAppearanceUpdateData {
+pub struct UpdateGroupAppearanceData {
     pub group_id: SnowflakeID,
     pub new_name: Option<String>,
     pub new_avatar: Option<Vec<u8>>
@@ -349,7 +352,7 @@ pub struct GroupAppearanceUpdateData {
 
 #[route("groups.appearance.update")]
 pub async fn update_group_appearance(ctx: &mut EchoContext) -> RouteResult<()> {
-    let GroupAppearanceUpdateData {
+    let UpdateGroupAppearanceData {
         group_id,
         new_name,
         new_avatar
@@ -694,6 +697,8 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         bail!(E::Group(G::GroupNotFound));
     }
 
+    let members = get_group_members(ctx, group_id).await?;
+
     let mut tx = ctx
         .pool
         .begin()
@@ -713,11 +718,9 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         user_id
     );
 
-    let members = get_group_members(ctx, group_id).await?;
-
     info!("User left group {group_id}");
 
-    if members.is_empty() {
+    if members == [user_id] {
         info!("Group has no more members, deleting...");
 
         execute!(
@@ -727,7 +730,7 @@ pub async fn leave_group(ctx: &mut EchoContext) -> RouteResult<()> {
         );
     }
     else {
-        info!("Group now has {} members left", members.len());
+        info!("Group now has {} members left", members.len() - 1);
 
         ctx.dispatcher.dispatch(
             members,
@@ -1121,6 +1124,17 @@ pub async fn create_new_group_emoji(ctx: &mut EchoContext) -> RouteResult<Emoji>
     // say it's for added flexibility and easier implementation.
     if count >= 500 {
         bail!(E::Group(G::TooManyEmojis));
+    }
+
+    let emoji_name_taken = exists!(
+        &ctx.pool,
+        "SELECT 1 FROM group_emojis WHERE group_id = $1 AND name = $2",
+        group_id,
+        &name
+    );
+
+    if emoji_name_taken {
+        bail!(E::Group(G::EmojiNameTaken));
     }
 
     ctx.stream.send(ok!(())).await?;

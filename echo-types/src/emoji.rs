@@ -13,10 +13,8 @@ pub struct Emoji {
 }
 
 /// A reaction attached to a message.
-#[derive(Clone, Debug, Deserialize, FromRow, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]
 pub struct Reaction {
-    pub message_id: SnowflakeID,
     pub author: SnowflakeID,
-    #[sqlx(flatten)]
-    pub emoji: Emoji
+    pub emoji: SnowflakeID
 }

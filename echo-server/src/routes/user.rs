@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, AssetID, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserDiff, UserEncryptedInfo, UserEncryptedInfoDiff, UserPublicKeys, UserSettings};
+use echo_types::{Activity, AssetID, BoxPublicKey, Compressable, Compressed, Encrypted, Friend, FriendRequests, PasswordProtected, ReadWatermark, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserDiff};
 use p256::{ecdsa::SigningKey, elliptic_curve::Generate};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
@@ -50,7 +50,7 @@ pub async fn login(ctx: &mut EchoContext) -> RouteResult<()> {
             uei.encrypted_secret,
             upk.signature_verifier
         FROM users u
-        INNER JOIN users_public_keys upk
+        INNER JOIN users_crypto_info upk
             ON u.id = upk.user_id
         INNER JOIN users_encrypted_info uei
             ON u.id = uei.user_id
@@ -99,49 +99,6 @@ pub async fn get_user(ctx: &mut EchoContext) -> RouteResult<User> {
     Ok(user)
 }
 
-#[route("users.keys.public.get")]
-pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPublicKeys> {
-    let user_id: SnowflakeID = ctx
-        .stream
-        .receive()
-        .await?;
-
-    let stmt = "
-        SELECT
-            signature_verifier,
-            box_public_key
-        FROM users_public_keys
-        WHERE user_id = $1
-    ";
-
-    let user_public_keys: UserPublicKeys = fetch_opt_as!(&ctx.pool, stmt, user_id)
-        .context(E::User(U::NotFound))?;
-
-    Ok(user_public_keys)
-}
-
-#[route("users.info.encrypted.get")]
-#[no_auth]
-pub async fn get_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<UserEncryptedInfo> {
-    let user_id: SnowflakeID = ctx
-        .stream
-        .receive()
-        .await?;
-
-    let stmt = "
-        SELECT
-            encrypted_secret,
-            encrypted_state
-        FROM users_encrypted_info
-        WHERE user_id = $1
-    ";
-
-    let user_encrypted_info: UserEncryptedInfo = fetch_opt_as!(&ctx.pool, stmt, user_id)
-        .context(E::User(U::NotFound))?;
-
-    Ok(user_encrypted_info)
-}
-
 /// Data related to creating a new user.
 ///
 /// The client is responsible for generating their
@@ -150,7 +107,6 @@ pub async fn get_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<UserE
 pub struct CreateNewUserData {
     pub username: String,
     pub secret: PasswordProtected<Secret>,
-    pub settings: Encrypted<UserSettings>,
     pub signature_verifier: SignatureVerifier,
     pub box_public_key: BoxPublicKey
 }
@@ -161,7 +117,6 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let CreateNewUserData {
         username,
         secret,
-        settings,
         signature_verifier,
         box_public_key
     } = ctx
@@ -194,7 +149,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         activity: Activity::Online,
         about_me: String::new(),
         status: String::new(),
-        show_in_searches: true
+        show_in_searches: true,
+        box_public_key
     };
 
     let mut tx = ctx
@@ -229,11 +185,12 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     );
 
     let stmt = "
-        INSERT INTO users_encrypted_info (
+        INSERT INTO users_crypto_info (
             user_id,
             encrypted_secret,
-            encrypted_state
-        ) VALUES ($1, $2, $3)
+            signature_verifier,
+            box_public_key
+        ) VALUES ($1, $2, $3, $4)
     ";
 
     execute!(
@@ -241,21 +198,6 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         stmt,
         user.id,
         secret,
-        settings
-    );
-
-    let stmt = "
-        INSERT INTO users_public_keys (
-            user_id,
-            signature_verifier,
-            box_public_key
-        ) VALUES ($1, $2, $3)
-    ";
-
-    execute!(
-        &mut *tx,
-        stmt,
-        user.id,
         signature_verifier,
         box_public_key
     );
@@ -306,7 +248,7 @@ pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
         }
     }
 
-    if new.id != old.id {
+    if new.id != old.id || new.box_public_key != old.box_public_key {
         bail!(E::InvalidData);
     }
 
@@ -355,47 +297,34 @@ pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
     Ok(())
 }
 
-#[route("users.info.encrypted.update")]
-pub async fn update_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<()> {
-    let diffs: Vec<UserEncryptedInfoDiff> = ctx.stream.receive().await?;
-
-    if diffs.is_empty() {
-        return Ok(());
-    }
-
-    let stmt = "
-        SELECT
-            encrypted_secret,
-            encrypted_state
-        FROM users_encrypted_info
-        WHERE user_id = $1
-    ";
-
-    let old: UserEncryptedInfo = fetch_one_as!(
-        &ctx.pool,
-        stmt,
-        ctx.user.unwrap()
-    );
-
-    let new = old.apply(diffs);
-
-    let stmt = "
-        UPDATE users_encrypted_info
-        SET
-            encrypted_secret = $2,
-            encrypted_state = $3
-        WHERE user_id = $1
-    ";
+#[route("users.state.update")]
+pub async fn update_user_state(ctx: &mut EchoContext) -> RouteResult<()> {
+    let new_state: Encrypted<()> = ctx.stream.receive_capped(5_000).await?;
 
     execute!(
         &ctx.pool,
-        stmt,
+        "UPDATE users_crypto_info SET encrypted_state = $2 WHERE user_id = $1",
         ctx.user.unwrap(),
-        new.secret,
-        new.settings
+        new_state
     );
 
-    info!("User updated their encrypted information");
+    info!("User uploaded a new state");
+
+    Ok(())
+}
+
+#[route("users.password.change")]
+pub async fn change_password(ctx: &mut EchoContext) -> RouteResult<()> {
+    let new_secret: PasswordProtected<Secret> = ctx.stream.receive().await?;
+
+    execute!(
+        &ctx.pool,
+        "UPDATE users_crypto_info SET encrypted_secret = $2 WHERE user_id = $1",
+        ctx.user.unwrap(),
+        new_secret
+    );
+
+    info!("User changed their password");
 
     Ok(())
 }
@@ -482,17 +411,19 @@ pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
             format!("deleted.account.{extension}")
         );
 
-        execute!(
-            &mut *tx,
-            "UPDATE users_encrypted_info SET encrypted_secret = $2 WHERE user_id = $1",
-            ctx.user.unwrap(),
-            Vec::<u8>::new()
-        );
+        let stmt = "
+            UPDATE users_encrypted_info
+            SET
+                encrypted_secret = $2,
+                signature_verifier = $3
+            WHERE user_id = $1
+        ";
 
         execute!(
             &mut *tx,
-            "UPDATE users_public_keys SET signature_verifier = $2 WHERE user_id = $1",
+            stmt,
             ctx.user.unwrap(),
+            Vec::<u8>::new(),
             fake_verifier
         );
 
@@ -509,7 +440,8 @@ pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
 #[derive(Deserialize, Serialize)]
 pub enum UserSearchAction {
     NextPage,
-    ChangeQuery(String)
+    ChangeQuery(String),
+    Quit
 }
 
 /// A result from searching for user accounts.
@@ -549,11 +481,11 @@ pub async fn search_for_users(ctx: &mut EchoContext) -> RouteResult<()> {
 
         ctx.stream.send(&results).await?;
 
-        if results.is_empty() {
+        let search_action: UserSearchAction = ctx.stream.receive().await?;
+
+        if matches!(search_action, UserSearchAction::Quit) {
             break;
         }
-
-        let search_action: UserSearchAction = ctx.stream.receive().await?;
 
         if let UserSearchAction::ChangeQuery(new_base) = search_action {
             base = new_base;
@@ -571,18 +503,23 @@ pub async fn search_for_users(ctx: &mut EchoContext) -> RouteResult<()> {
 }
 
 #[route("users.friends.get")]
-pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Vec<Friend>> {
+pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Compressed<Vec<Friend>>> {
     let stmt = r#"
         SELECT
             f.user1 AS "user_id",
             f.friends_since,
             f.conversation_id,
-            cm.last_message_id_read,
-            cm.last_message_read_at
+            cm1.last_message_id_read AS "ours_last_message_id_read",
+            cm1.last_message_read_at AS "ours_last_message_read_at",
+            cm2.last_message_id_read AS "theirs_last_message_id_read",
+            cm2.last_message_read_at AS "theirs_last_message_read_at"
         FROM friendships f
-        INNER JOIN conversation_members cm
-            ON cm.conversation_id = f.conversation_id
-            AND cm.user_id = f.user1
+        INNER JOIN conversation_members cm1
+            ON cm1.conversation_id = f.conversation_id
+            AND cm1.user_id = f.user1
+        INNER JOIN conversation_members cm2
+            ON cm2.conversation_id = f.conversation_id
+            AND cm2.user_id = f.user2
         WHERE f.user2 = $1
 
         UNION ALL
@@ -591,37 +528,29 @@ pub async fn get_user_friends(ctx: &mut EchoContext) -> RouteResult<Vec<Friend>>
             f.user2 AS "user_id",
             f.friends_since,
             f.conversation_id,
-            cm.last_message_id_read,
-            cm.last_message_read_at
+            cm2.last_message_id_read AS "ours_last_message_id_read",
+            cm2.last_message_read_at AS "ours_last_message_read_at",
+            cm1.last_message_id_read AS "theirs_last_message_id_read",
+            cm1.last_message_read_at AS "theirs_last_message_read_at"
         FROM friendships f
-        INNER JOIN conversation_members cm
-            ON cm.conversation_id = f.conversation_id
-            AND cm.user_id = f.user2
+        INNER JOIN conversation_members cm1
+            ON cm1.conversation_id = f.conversation_id
+            AND cm1.user_id = f.user1
+        INNER JOIN conversation_members cm2
+            ON cm2.conversation_id = f.conversation_id
+            AND cm2.user_id = f.user2
         WHERE f.user1 = $1
     "#;
 
     let user_id = ctx.user.unwrap();
 
-    let raw_friends: Vec<_> = fetch_all_as!(
+    let friends: Vec<Friend> = fetch_all_as!(
         &ctx.pool,
         stmt,
         user_id
     );
 
-    let friends = raw_friends
-        .into_iter()
-        .map(|(user_id, friends_since, conversation_id, last_id, read_at)| Friend {
-            user_id,
-            friends_since,
-            conversation_id,
-            read_watermark: SqlxReadWatermark {
-                last_message_id_read: last_id,
-                last_message_read_at: read_at
-            }.convert()
-        })
-        .collect();
-
-    Ok(friends)
+    Ok(friends.compress())
 }
 
 #[route("users.friends.remove")]
@@ -672,24 +601,25 @@ pub async fn remove_friend(ctx: &mut EchoContext) -> RouteResult<()> {
 }
 
 #[route("users.friends.requests.get")]
-pub async fn get_friend_requests(ctx: &mut EchoContext) -> RouteResult<Vec<FriendRequest>> {
-    let stmt = "
-        SELECT
-            sender,
-            sent_at
-        FROM friend_requests
-        WHERE receiver = $1
-    ";
-
+pub async fn get_friend_requests(ctx: &mut EchoContext) -> RouteResult<FriendRequests> {
     let user_id = ctx.user.unwrap();
 
-    let friend_requests: Vec<FriendRequest> = fetch_all_as!(
+    let incoming = fetch_all_as!(
         &ctx.pool,
-        stmt,
+        "SELECT sender, sent_at FROM friend_requests WHERE receiver = $1",
         user_id
     );
 
-    Ok(friend_requests)
+    let outgoing = fetch_all_as!(
+        &ctx.pool,
+        "SELECT receiver, sent_at FROM friend_requests WHERE sender = $1",
+        user_id
+    );
+
+    Ok(FriendRequests {
+        incoming,
+        outgoing
+    })
 }
 
 #[route("users.friends.requests.create")]
@@ -852,4 +782,32 @@ pub async fn cancel_friend_request(ctx: &mut EchoContext) -> RouteResult<()> {
     info!("User cancelled their friend request to {receiver}");
 
     Ok(())
+}
+
+#[route("users.groups.get")]
+pub async fn get_user_groups(ctx: &mut EchoContext) -> RouteResult<Compressed<Vec<(SnowflakeID, Option<ReadWatermark>)>>> {
+    let stmt = "
+        SELECT
+            conversation_id,
+            last_message_id_read,
+            last_message_read_at,
+        FROM conversation_members
+        WHERE user_id = $1
+        AND EXISTS (
+            SELECT 1 FROM groups WHERE id = conversation_id
+        )
+    ";
+
+    let raw: Vec<(SnowflakeID, Option<_>, Option<_>)> = fetch_all_as!(
+        &ctx.pool,
+        stmt,
+        ctx.user.unwrap()
+    );
+
+    let groups: Vec<_> = raw
+        .into_iter()
+        .map(|(id, last_message_id_read, last_message_read_at)| (id, SqlxReadWatermark { last_message_id_read, last_message_read_at}.convert()))
+        .collect();
+
+    Ok(groups.compress())
 }

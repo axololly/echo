@@ -18,26 +18,17 @@ CREATE TABLE users (
     activity "Activity" NOT NULL,
     about_me TEXT NOT NULL CHECK (char_length(about_me) <= 2000),
     status TEXT NOT NULL CHECK (char_length(status) <= 200),
-    show_in_searches BOOLEAN NOT NULL DEFAULT TRUE
+    show_in_searches BOOLEAN NOT NULL DEFAULT TRUE,
+    box_public_key BYTEA NOT NULL
 );
 
-CREATE TABLE users_encrypted_info (
-    user_id INT8 NOT NULL
-        REFERENCES users(id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE,
-
-    encrypted_secret BYTEA NOT NULL,
-    encrypted_state BYTEA NOT NULL
-);
-
-CREATE TABLE users_public_keys (
+CREATE TABLE users_crypto_info (
     user_id INT8 REFERENCES users(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
 
+    encrypted_secret BYTEA NOT NULL,
     signature_verifier BYTEA NOT NULL,
-    box_public_key BYTEA NOT NULL,
 
     PRIMARY KEY (user_id)
 );
@@ -77,6 +68,21 @@ CREATE TABLE friendships (
 );
 
 CREATE INDEX idx_friendships_user2 ON friendships(user2, user1);
+
+CREATE OR REPLACE FUNCTION delete_friendship_conversation()
+RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM conversations
+    WHERE id = OLD.conversation_id;
+
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER friendship_delete_conversation
+AFTER DELETE ON friendships
+FOR EACH ROW
+EXECUTE FUNCTION delete_friendship_conversation();
 
 -- A table for pending friend requests.
 -- The one-time key is the public OTK that is used for Olm's 3DH.
@@ -179,6 +185,26 @@ CREATE TABLE conversation_members (
         (last_message_id_read IS NULL) = (last_message_read_at IS NULL)
     )
 );
+
+CREATE OR REPLACE FUNCTION delete_empty_conversation()
+RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM conversations
+    WHERE id = OLD.conversation_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation_members
+          WHERE conversation_id = OLD.conversation_id
+      );
+
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER conversation_members_delete_empty
+AFTER DELETE ON conversation_members
+FOR EACH ROW
+EXECUTE FUNCTION delete_empty_conversation();
 
 CREATE INDEX idx_conversation_members_user_id ON conversation_members(user_id, conversation_id);
 CREATE INDEX idx_conversation_members_joined_at ON conversation_members(conversation_id, joined_at);
@@ -285,6 +311,8 @@ CREATE TABLE message_attachments (
         REFERENCES messages(id)
         ON UPDATE CASCADE
         ON DELETE SET NULL,
+
+    filename TEXT NOT NULL,
 
     asset_id "AssetID" NOT NULL,
 

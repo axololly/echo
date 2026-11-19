@@ -40,7 +40,7 @@ pub enum RouteError {
     Conversation(#[from] ConversationRouteError)
 }
 
-pub type RouteResult<T> = Result<T, RouteError>;
+pub(crate) type RouteResult<T> = Result<T, RouteError>;
 
 /// Too much data was sent by the client, causing the server to close the stream.
 pub const DATA_TOO_LARGE: VarInt = VarInt::from_u32(100);

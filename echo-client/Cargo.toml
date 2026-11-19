@@ -1,0 +1,21 @@
+[package]
+name = "echo-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.92"
+bitcode = { version = "0.6.9", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+dashmap = "6.2.1"
+echo-server = { path = "../echo-server" }
+echo-types = { path = "../echo-types" }
+lru = "0.19.0"
+quinn = "0.11.12"
+rootcause = "0.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
+structdiff = { version = "0.7.3", features = ["serde"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+vodozemac = "0.11.2"
+webpki-roots = "1.0.12"

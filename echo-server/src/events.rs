@@ -2,7 +2,7 @@ use std::{ops::{Deref, DerefMut}, sync::Arc};
 
 use chrono::TimeDelta;
 use dashmap::{DashMap, DashSet};
-use echo_types::{AssetID, Emoji, GroupInvite, SnowflakeID};
+use echo_types::{AssetID, Emoji, Encrypted, GroupInvite, Reaction, SnowflakeID};
 use rootcause::prelude::ResultExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}};
@@ -60,23 +60,18 @@ pub enum Event {
         new_invite: GroupInvite
     },
 
-    /// New message sent in group
-    NewGroupMessage {
-        group_id: SnowflakeID,
-        author_id: SnowflakeID,
-        message_id: SnowflakeID
-    },
-
     /// Message was pinned or unpinned
     MessagePinStatusUpdated {
         message_id: SnowflakeID,
+        conversation_id: SnowflakeID,
         pinned: bool
     },
 
     /// Message was edited
     MessageEdited {
         conversation_id: SnowflakeID,
-        message_id: SnowflakeID
+        message_id: SnowflakeID,
+        new_body: Encrypted<String>
     },
 
     /// Message was deleted
@@ -91,18 +86,11 @@ pub enum Event {
     /// Emoji deleted
     GroupEmojiDeleted(SnowflakeID),
 
-    /// New reaction added
-    NewReactionAdded {
+    /// Reaction either added or removed
+    MessageReactionUpdate {
         message_id: SnowflakeID,
-        author: SnowflakeID,
-        emoji_id: SnowflakeID
-    },
-
-    /// Reaction removed
-    ReactionRemoved {
-        message_id: SnowflakeID,
-        author: SnowflakeID,
-        emoji_id: SnowflakeID
+        reaction: Reaction,
+        exists: bool
     },
 
     /// Updated conversation timer

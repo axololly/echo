@@ -1,597 +1,15 @@
-#![allow(unused)]
+use std::{str::FromStr, sync::Arc};
 
-use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, path::{Path, PathBuf}, str::FromStr, sync::{Arc, atomic::{AtomicU16, Ordering}}, time::Duration};
-
-use chrono::TimeDelta;
-use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddFriendToGroupData, AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData, UpdateReadWatermarkData}, runner::run, stream::Stream};
-use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings};
+use echo_client::client::Client;
+use echo_server::{router::EchoRouter, runner::run};
+use echo_types::Friend;
 use pgtemp::PgTempDB;
-use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
-use rootcause::{Result, bail, option_ext::OptionExt, prelude::ResultExt};
+use rootcause::Result;
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use sqlx::{Executor, postgres::{PgConnectOptions, PgPoolOptions}};
-use structdiff::StructDiff;
-use tokio::fs;
-use vodozemac::megolm::{GroupSession, InboundGroupSession, SessionConfig as MegolmSessionConfig};
 
-// Helper function to turn a raw address into a [`SocketAddr`].
-fn into_socket_addr(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
-    let socket_addr = addr
-        .to_socket_addrs()
-        .context("failed to resolve IP")?
-        .next()
-        .context("failed to resolve IP - none found")?;
-
-    Ok(socket_addr)
-}
-
-/// Configure the client and then connect to the QUIC endpoint on the server.
-async fn connect_to_server(
-    local_addr: impl ToSocketAddrs,
-    server_addr: impl ToSocketAddrs,
-    cert: CertificateDer<'static>
-) -> Result<quinn::Connection> {
-    let local = into_socket_addr(local_addr)?;
-
-    let mut root_store = rustls::RootCertStore::from_iter(
-        webpki_roots::TLS_SERVER_ROOTS.iter().cloned()
-    );
-
-    // Add the certificate to the list of certificates the client trusts.
-    root_store.add(cert)?;
-
-    if root_store.is_empty() {
-        bail!("no TLS server certificates");
-    }
-
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    client_crypto.alpn_protocols = vec![b"hq-29".to_vec()];
-
-    let client_config = quinn::ClientConfig::new(
-        Arc::new(
-            QuicClientConfig::try_from(client_crypto)?
-        )
-    );
-
-    let mut endpoint = quinn::Endpoint::client(local)?;
-
-    endpoint.set_default_client_config(client_config);
-
-    let conn = endpoint
-        .connect(into_socket_addr(server_addr)?, "localhost")?
-        .await?;
-
-    Ok(conn)
-}
-
-/// Access a route in the API, then communicate with the server
-/// under that same route using the same [`Stream`].
-async fn access_route<R>(
-    parent: &quinn::Connection,
-    route: &str,
-    mut stream_fn: impl AsyncFnMut(&mut Stream) -> Result<R>
-) -> Result<R> {
-    let mut stream = Stream::open_bi(parent).await?;
-
-    println!("accessing route {route:?}");
-
-    // Handle routing to reduce boilerplate
-    stream.send(&route).await?;
-
-    stream.receive::<RouteResult<()>>().await??;
-
-    // Hand off execution on the route to the caller
-    let out = stream_fn(&mut stream).await?;
-
-    stream.close()?;
-
-    Ok(out)
-}
-
-const DEFAULT_PASSWORD: &str = "6767";
-
-type RouteResult<T> = std::result::Result<T, RouteError>;
-
-const SERVER_ADDR: &str = "localhost:4433";
-static PORT_NUM: AtomicU16 = AtomicU16::new(0);
-
-/// Create an account with a given username on the server,
-/// returning the created user object, and authenticating
-/// the connection too.
-async fn connect_and_create_account(
-    username: &str,
-    cert: CertificateDer<'static>
-) -> Result<(User, Secret, quinn::Connection)> {
-    let port_num = PORT_NUM.fetch_add(1, Ordering::Relaxed);
-
-    let parent = connect_to_server(
-        format!("localhost:{}", 10090 + port_num),
-        SERVER_ADDR,
-        cert
-    ).await?;
-
-    let secret = Secret::random();
-
-    let account = access_route(&parent, "users.create", async |stream| {
-        let data = CreateNewUserData {
-            username: username.to_string(),
-            secret: PasswordProtected::new(&secret, DEFAULT_PASSWORD),
-            settings: secret.encrypt(&UserSettings {
-                logout_after: 0,
-                enable_read_receipts: true,
-                enable_typing_indicators: true,
-                ignore_future_requests_from: vec![]
-            }),
-            signature_verifier: secret.into(),
-            box_public_key: secret.into()
-        };
-
-        stream.send(&data).await?;
-
-        let user: User = stream.receive::<RouteResult<_>>().await??;
-
-        dbg!((&user.name, user.id));
-
-        Ok(user)
-    }).await?;
-
-    println!("created user {username:?} with ID {}", account.id);
-
-    let event_listener = async |mut stream: Stream, username: String| -> Result<()> {
-        // Handle routing to reduce boilerplate
-        stream.send(&"events").await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        loop {
-            let event: Event = stream.receive::<RouteResult<_>>().await??;
-
-            println!("[event for {username:?}] new event: {event:?}");
-        }
-    };
-
-    let stream = Stream::open_bi(&parent).await?;
-    let username = username.to_string();
-
-    tokio::spawn(async move {
-        if let Err(e) = event_listener(stream, username).await {
-            println!("Error with receiving events on the client-side: {e:?}");
-        }
-    });
-
-    Ok((account, secret, parent))
-}
-
-/// Form a friend request between two users, and get the Olm sessions used
-/// to communicate for the pair
-async fn establish_friendship(
-    user1_data: (&quinn::Connection, &User),
-    user2_data: (&quinn::Connection, &User)
-) -> Result<SnowflakeID> {
-    let (conn1, user1) = user1_data;
-    let (conn2, user2) = user2_data;
-
-    access_route(conn1, "users.friends.requests.create", async |stream| {
-        stream.send(&user2.id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    access_route(conn2, "users.friends.requests.accept", async |stream| {
-        stream.send(&user1.id).await?;
-
-        let conversation_id: SnowflakeID = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(conversation_id)
-    }).await
-}
-
-async fn send_message(
-    user_secret: Secret,
-    user_conn: &quinn::Connection,
-    conversation_id: SnowflakeID,
-    message: &str,
-    attachments: Vec<Attachment>,
-    delete_after: Option<TimeDelta>
-) -> Result<(Message, Secret)> {
-    let message_secret = Secret::random();
-
-    let encrypted_attachments: Vec<_> = attachments
-        .into_iter()
-        .map(|a| message_secret.encrypt(&a))
-        .collect();
-
-    access_route(user_conn, "messages.sessions.ensure", async |stream| {
-        stream.send(&conversation_id).await?;
-
-        let needs_uploading: bool = stream.receive::<RouteResult<_>>().await??;
-
-        if !needs_uploading {
-            return Ok(());
-        }
-
-        let session = GroupSession::new(MegolmSessionConfig::version_1());
-        let session_key = session.session_key();
-
-        let other_members: HashMap<SnowflakeID, BoxPublicKey> = stream.receive::<RouteResult<_>>().await??;
-
-        let inbounds = other_members
-            .into_iter()
-            .map(|(id, pk)| (id, user_secret.box_for(&session_key, pk)))
-            .collect();
-
-        let group_chat_session = EncryptedChatSession {
-            outbound: user_secret.encrypt(&session.pickle()),
-            inbounds
-        };
-
-        stream.send(&group_chat_session).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    let mut session: GroupSession = access_route(user_conn, "messages.sessions.get", async |stream| {
-        stream.send(&conversation_id).await?;
-
-        let enc_session: EncryptedChatSession = stream.receive::<RouteResult<_>>().await??;
-
-        let sender = user_secret.decrypt(&enc_session.outbound)?;
-
-        Ok(sender.into())
-    }).await?;
-
-    let message = access_route(user_conn, "messages.send", async |stream| {
-        stream.send(&SendMessageData {
-            conversation_id,
-            replied_to: None,
-            message_body: message_secret.encrypt(&message.to_string()),
-            key_for_author: user_secret.encrypt(&message_secret),
-            key_for_others: session.encrypt(message_secret),
-            delete_after
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        stream.send(&encrypted_attachments).await?;
-
-        let msg = stream.receive::<RouteResult<Message>>().await??;
-
-        Ok(msg)
-    }).await?;
-
-    Ok((message, message_secret))
-}
-
-async fn process_messages(
-    user_secret: Secret,
-    user_conn: &quinn::Connection
-) -> Result<HashMap<SnowflakeID, Secret>> {
-    let mut message_secrets = HashMap::new();
-
-    access_route(user_conn, "messages.unread.process", async |stream| {
-        let mut unprocessed: HashMap<SnowflakeID, UnprocessedMessage>;
-
-        loop {
-            unprocessed = stream.receive::<RouteResult<_>>().await??;
-
-            if unprocessed.is_empty() {
-                break;
-            }
-
-            let mut processed: HashMap<SnowflakeID, Encrypted<Secret>> = HashMap::new();
-
-            for (message_id, UnprocessedMessage { box_public_key, session_key, message_key }) in unprocessed {
-                let session_key = user_secret.unbox_from(&session_key, box_public_key)?;
-
-                let mut inbound = InboundGroupSession::new(
-                    &session_key,
-                    MegolmSessionConfig::version_1()
-                );
-
-                let message_secret = {
-                    let dec = inbound.decrypt(&message_key)?;
-
-                    Secret::try_from_bytes(&dec.plaintext)
-                        .context("invalid megolm message bytes: was not secret")?
-                };
-
-                processed.insert(message_id, user_secret.encrypt(&message_secret));
-
-                message_secrets.insert(message_id, message_secret);
-            }
-
-            stream.send(&processed).await?;
-        }
-
-        Ok(())
-    }).await?;
-
-    Ok(message_secrets)
-}
-
-async fn fetch_message_history(
-    user_secret: Secret,
-    user_conn: &quinn::Connection,
-    conversation_id: SnowflakeID,
-    params: MessageHistoryParams
-) -> Result<Vec<(Message, Secret)>> {
-    access_route(user_conn, "messages.history.get", async |stream| {
-        stream.send(&GetMessageHistoryData {
-            conversation_id,
-            params,
-            limit: 100
-        }).await?;
-
-        let data: Vec<(Message, Encrypted<Secret>)> = stream.receive::<RouteResult<Compressed<_>>>().await??.decompress();
-
-        let mut messages = vec![];
-
-        for (msg, enc) in data {
-            let secret = user_secret.decrypt(&enc)?;
-
-            messages.push((msg, secret));
-        }
-
-        Ok(messages)
-    }).await
-}
-
-async fn fetch_message(
-    user_conn: &quinn::Connection,
-    message_id: SnowflakeID
-) -> Result<Message> {
-    access_route(user_conn, "messages.get", async |stream| {
-        stream.send(&message_id).await?;
-
-        let msg = stream.receive::<RouteResult<Message>>().await??;
-
-        Ok(msg)
-    }).await
-}
-
-async fn update_message_pin(
-    user_conn: &quinn::Connection,
-    message_id: SnowflakeID,
-    new_pin_status: bool
-) -> Result<()> {
-    access_route(user_conn, "messages.pin.update", async |stream| {
-        stream.send(&UpdateMessagePinData {
-            message_id,
-            new_pin_status
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-fn load_attachment_from_disk(path: impl AsRef<Path>) -> Result<Attachment> {
-    let path = path.as_ref();
-
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .context("failed to extract UTF-8 path name")?;
-
-    let data = std::fs::read(path)?;
-
-    Ok(Attachment {
-        filename: name.to_string(),
-        data
-    })
-}
-
-fn save_attachment_to_disk(attachment: &Attachment) -> Result<PathBuf> {
-    let path = Path::new("/tmp").join(&attachment.filename);
-
-    std::fs::write(
-        &path,
-        &attachment.data
-    )?;
-
-    Ok(path)
-}
-
-async fn fetch_asset(
-    user_conn: &quinn::Connection,
-    asset_id: AssetID
-) -> Result<Vec<u8>> {
-    access_route(user_conn, "assets.fetch", async |stream| {
-        stream.send(&asset_id).await?;
-
-        let maybe_blob: Option<Vec<u8>> = stream.receive::<RouteResult<_>>().await??;
-
-        let blob = maybe_blob.context("failed to fetch asset")?;
-
-        Ok(blob)
-    }).await
-}
-
-async fn fetch_attachment(
-    user_conn: &quinn::Connection,
-    asset_id: AssetID,
-    secret: Secret
-) -> Result<Attachment> {
-    let blob = fetch_asset(user_conn, asset_id).await?;
-
-    let enc: Encrypted<Attachment> = bitcode::deserialize(&blob)?;
-
-    let atch = secret.decrypt(&enc)?;
-
-    Ok(atch)
-}
-
-async fn upload_new_emoji(
-    user_conn: &quinn::Connection,
-    group_id: SnowflakeID,
-    name: &str,
-    emoji_blob: &[u8]
-) -> Result<Emoji> {
-    access_route(user_conn, "groups.emojis.create", async |stream| {
-        stream.send(&CreateNewEmojiData {
-            group_id,
-            name: name.to_string()
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await?;
-
-        stream.send(&emoji_blob).await?;
-
-        let emoji = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(emoji)
-    }).await
-}
-
-async fn delete_emoji(
-    user_conn: &quinn::Connection,
-    group_id: SnowflakeID,
-    emoji_id: SnowflakeID
-) -> Result<()> {
-    access_route(user_conn, "groups.emojis.delete", async |stream| {
-        stream.send(&DeleteGroupEmojiData {
-            group_id,
-            emoji_id
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-async fn add_reaction(
-    user_conn: &quinn::Connection,
-    message_id: SnowflakeID,
-    emoji_id: SnowflakeID
-) -> Result<()> {
-    access_route(user_conn, "messages.reactions.add", async |stream| {
-        stream.send(&AddNewReactionData {
-            message_id,
-            emoji_id
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-async fn remove_reaction(
-    user_conn: &quinn::Connection,
-    message_id: SnowflakeID,
-    emoji_id: SnowflakeID
-) -> Result<()> {
-    access_route(user_conn, "messages.reactions.remove", async |stream| {
-        stream.send(&RemoveReactionData {
-            message_id,
-            emoji_id
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-async fn get_reactions(
-    user_conn: &quinn::Connection,
-    message_id: SnowflakeID
-) -> Result<Vec<Reaction>> {
-    access_route(user_conn, "messages.reactions.get", async |stream| {
-        stream.send(&message_id).await?;
-
-        let reactions = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(reactions)
-    }).await
-}
-
-async fn subscribe_to_typing_events(
-    user_conn: &quinn::Connection,
-    conversation_id: SnowflakeID
-) -> Result<()> {
-    access_route(user_conn, "conversations.typing.subscribe", async |stream| {
-        stream.send(&conversation_id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-async fn start_typing(
-    user_conn: &quinn::Connection,
-    conversation_id: SnowflakeID
-) -> Result<()> {
-    access_route(user_conn, "conversations.typing.start", async |stream| {
-        stream.send(&conversation_id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-async fn update_read_watermark(
-    user_conn: &quinn::Connection,
-    conversation_id: SnowflakeID,
-    message_id: SnowflakeID
-) -> Result<()> {
-    access_route(user_conn, "messages.watermark.update", async |stream| {
-        stream.send(&UpdateReadWatermarkData {
-            conversation_id,
-            message_id
-        }).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-async fn fetch_user(
-    user_conn: &quinn::Connection,
-    user_id: SnowflakeID
-) -> Result<User> {
-    access_route(user_conn, "users.get", async |stream| {
-        stream.send(&user_id).await?;
-
-        let user = stream.receive::<RouteResult<_>>().await??;
-
-        Ok(user)
-    }).await
-}
-
-async fn update_account(
-    user_conn: &quinn::Connection,
-    old: &User,
-    new: &User
-) -> Result<()> {
-    access_route(user_conn, "users.update", async |stream| {
-        let diffs = old.diff(new);
-
-        dbg!(&diffs);
-
-        stream.send(&diffs).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run_server() -> Result<()> {
     let temp = PgTempDB::from_builder(
         PgTempDB::builder()
             .with_bin_path("/usr/lib/postgresql/18/bin")
@@ -633,9 +51,11 @@ async fn main() -> Result<()> {
         std::fs::remove_dir_all(asset_storage_path)?;
     }
 
+    println!("starting server");
+
     // Start the server up
     tokio::spawn(run(
-        SERVER_ADDR,
+        "127.0.0.1:4433",
         vec![cert.clone()],
         key.into(),
         10,
@@ -644,78 +64,68 @@ async fn main() -> Result<()> {
         asset_storage_path
     ));
 
-    let (alice, alice_secret, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
-    let (bob, bob_secret, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
-    let (chloe, chloe_secret, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
+    Ok(())
+}
 
-    establish_friendship(
-        (&alice_conn, &alice),
-        (&bob_conn, &bob)
+const DEFAULT_PASSWORD: &str = "password";
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    run_server().await?;
+
+    let alice = Client::create_account(
+        "alice",
+        DEFAULT_PASSWORD,
+        ("127.0.0.1", 4433)
     ).await?;
 
-    establish_friendship(
-        (&alice_conn, &alice),
-        (&chloe_conn, &chloe)
+    let bob = Client::create_account(
+        "bob",
+        DEFAULT_PASSWORD,
+        ("127.0.0.1", 4433)
     ).await?;
 
-    let group = access_route(&alice_conn, "groups.create", async |stream| {
-        stream.send(&CreateNewGroupData {
-            name: None,
-            initial_members: vec![bob.id, chloe.id]
-        }).await?;
+    alice.send_friend_request_to(bob.user_id()).await?;
 
-        let group: Group = stream.receive::<RouteResult<_>>().await??;
+    bob.accept_friend_request_from(alice.user_id()).await?;
 
-        Ok(group)
-    }).await?;
-
-    let (msg, _) = send_message(
-        bob_secret,
-        &bob_conn,
-        group.id,
-        "hello guys",
-        vec![],
-        None
-    ).await?;
-
-    access_route(&bob_conn, "users.delete", async |stream| {
-        // Delete all her data
-        stream.send(&false).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    // This will succeed
-    fetch_message(&alice_conn, msg.id).await?;
-
-    let (msg2, _) = send_message(
-        chloe_secret,
-        &chloe_conn,
-        group.id,
-        "hello guys",
-        vec![],
-        None
-    ).await?;
-
-    access_route(&chloe_conn, "users.delete", async |stream| {
-        // Delete all her data
-        stream.send(&true).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
-    let fetch_result = fetch_message(&alice_conn, msg2.id).await;
+    let friends: Vec<Friend> = alice.get_friends().await?;
 
     assert!(
-        fetch_result.is_err(),
-        "alice was able to fetch a message chloe requested to be deleted"
+        friends[0].user_id == bob.user_id(),
+        "bob was not alice's friend"
     );
 
-    println!("assertions passed!");
+    let conversation_id = friends[0].conversation_id;
+
+    alice.send_message(conversation_id, "hello bob", vec![], None).await?;
+
+    let mut history = bob.get_conversation_history(conversation_id, None, None, 100).await;
+
+    loop {
+        let messages = history.fetch_next().await?;
+
+        if messages.is_empty() {
+            break;
+        }
+
+        for (message, secret) in messages {
+            let Ok(content) = secret.decrypt(&message.body) else {
+                continue;
+            };
+
+            let fetched = alice.fetch_user(message.author).await?;
+
+            let username = if let Some(user) = &fetched {
+                user.name.as_str()
+            }
+            else {
+                "<unknown user>"
+            };
+
+            println!("{username}: {content}");
+        }
+    }
 
     Ok(())
 }
