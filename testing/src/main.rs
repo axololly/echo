@@ -141,16 +141,6 @@ async fn connect_and_create_account(
 
     println!("created user {username:?} with ID {}", account.id);
 
-    access_route(&parent, "login", async |stream| {
-        let signed_id = secret.sign(account.id);
-
-        stream.send(&signed_id).await?;
-
-        stream.receive::<RouteResult<()>>().await??;
-
-        Ok(())
-    }).await?;
-
     let event_listener = async |mut stream: Stream, username: String| -> Result<()> {
         // Handle routing to reduce boilerplate
         stream.send(&"events").await?;
