@@ -43,20 +43,10 @@ pub struct UserSettings {
     pub ignore_future_requests_from: Vec<SnowflakeID>
 }
 
-/// The user's state.
-///
-/// This only contains their settings for now,
-/// but this will eventually include DM sessions
-/// and group sessions with other people.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UserState {
-    pub settings: UserSettings,
-    // TODO: UserState involving the sessions with other people
-}
-
 /// An Echo user.
 ///
-/// Their public key information can be found in [`UserPublicKeys`].
+/// Their public key information can be found in [`UserPublicKeys`],
+/// and their encrypted information can be found in [`UserEncryptedInfo`].
 #[derive(Clone, Debug, Deserialize, Difference, Eq, FromRow, PartialEq, Serialize)]
 pub struct User {
     pub id: SnowflakeID,
@@ -66,13 +56,22 @@ pub struct User {
     pub activity: Activity,
     pub status: String,
     pub about_me: String,
-    #[sqlx(rename = "encrypted_secret")]
-    pub secret: PasswordProtected<Secret>,
-    #[sqlx(rename = "encrypted_state")]
-    pub state: Encrypted<UserState>
+    pub show_in_searches: bool
 }
 
 pub type UserDiff = <User as StructDiff>::Diff;
+
+/// A user's secret cryptographic information.
+#[derive(Clone, Debug, Deserialize, Difference, Eq, FromRow, PartialEq, Serialize)]
+pub struct UserEncryptedInfo {
+    #[sqlx(rename = "encrypted_secret")]
+    pub secret: PasswordProtected<Secret>,
+
+    #[sqlx(rename = "encrypted_state")]
+    pub settings: Encrypted<UserSettings>
+}
+
+pub type UserEncryptedInfoDiff = <UserEncryptedInfo as StructDiff>::Diff;
 
 /// A user's public key information.
 #[derive(Clone, Debug, Deserialize, Eq, FromRow, PartialEq, Serialize)]

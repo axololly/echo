@@ -1,10 +1,11 @@
 use std::sync::LazyLock;
 
-use echo_types::{Activity, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserDiff, UserPublicKeys, UserState};
+use echo_types::{Activity, AssetID, BoxPublicKey, Encrypted, Friend, FriendRequest, PasswordProtected, SNOWFLAKE_GEN, Secret, SignatureVerifier, Signed, SnowflakeID, SqlxReadWatermark, User, UserDiff, UserEncryptedInfo, UserEncryptedInfoDiff, UserPublicKeys, UserSettings};
 use p256::{ecdsa::SigningKey, elliptic_curve::Generate};
 use regex::Regex;
 use rootcause::{bail, option_ext::OptionExt, prelude::ResultExt};
 use serde::{Deserialize, Serialize};
+use sqlx::prelude::FromRow;
 use structdiff::StructDiff;
 use thiserror::Error;
 
@@ -95,6 +96,28 @@ pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPubl
     Ok(user_public_keys)
 }
 
+#[route("users.info.encrypted.get")]
+#[no_auth]
+pub async fn get_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<UserEncryptedInfo> {
+    let user_id: SnowflakeID = ctx // TODO: support looking up users by name
+        .stream
+        .receive()
+        .await?;
+
+    let stmt = "
+        SELECT
+            encrypted_secret,
+            encrypted_state
+        FROM users_encrypted_info
+        WHERE user_id = $1
+    ";
+
+    let user_encrypted_info: UserEncryptedInfo = fetch_opt_as!(&ctx.pool, stmt, user_id)
+        .context(E::User(U::NotFound))?;
+
+    Ok(user_encrypted_info)
+}
+
 /// Data related to creating a new user.
 ///
 /// The client is responsible for generating their
@@ -103,7 +126,7 @@ pub async fn get_user_public_keys(ctx: &mut EchoContext) -> RouteResult<UserPubl
 pub struct CreateNewUserData {
     pub username: String,
     pub secret: PasswordProtected<Secret>,
-    pub state: Encrypted<UserState>,
+    pub settings: Encrypted<UserSettings>,
     pub signature_verifier: SignatureVerifier,
     pub box_public_key: BoxPublicKey
 }
@@ -114,7 +137,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
     let CreateNewUserData {
         username,
         secret,
-        state,
+        settings,
         signature_verifier,
         box_public_key
     } = ctx
@@ -147,8 +170,7 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         activity: Activity::Online,
         about_me: String::new(),
         status: String::new(),
-        secret,
-        state
+        show_in_searches: true
     };
 
     let mut tx = ctx
@@ -165,10 +187,8 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
             avatar,
             activity,
             about_me,
-            status,
-            encrypted_secret,
-            encrypted_state
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
     ";
 
     // Add the user account to the database.
@@ -181,9 +201,23 @@ pub async fn create_new_user(ctx: &mut EchoContext) -> RouteResult<User> {
         &user.avatar,
         &user.activity,
         &user.about_me,
-        &user.status,
-        &user.secret,
-        &user.state
+        &user.status
+    );
+
+    let stmt = "
+        INSERT INTO users_encrypted_info (
+            user_id,
+            encrypted_secret,
+            encrypted_state
+        ) VALUES ($1, $2, $3)
+    ";
+
+    execute!(
+        &mut *tx,
+        stmt,
+        user.id,
+        secret,
+        settings
     );
 
     let stmt = "
@@ -213,7 +247,7 @@ pub static VALID_DISPLAY_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 #[route("users.update")]
-pub async fn update_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
+pub async fn update_user_profile(ctx: &mut EchoContext) -> RouteResult<()> {
     let diffs: Vec<UserDiff> = ctx.stream.receive().await?;
 
     if diffs.is_empty() {
@@ -283,12 +317,53 @@ pub async fn update_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
         &new.avatar,
         &new.activity,
         &new.about_me,
-        &new.status,
-        &new.secret,
-        &new.state
+        &new.status
     );
 
     ctx.profile_update_pubsub.publish(ctx.user.unwrap());
+
+    Ok(())
+}
+
+#[route("users.info.encrypted.update")]
+pub async fn update_user_encrypted_info(ctx: &mut EchoContext) -> RouteResult<()> {
+    let diffs: Vec<UserEncryptedInfoDiff> = ctx.stream.receive().await?;
+
+    if diffs.is_empty() {
+        return Ok(());
+    }
+
+    let stmt = "
+        SELECT
+            encrypted_secret,
+            encrypted_state
+        FROM users_encrypted_info
+        WHERE user_id = $1
+    ";
+
+    let old: UserEncryptedInfo = fetch_one_as!(
+        &ctx.pool,
+        stmt,
+        ctx.user.unwrap()
+    );
+
+    let new = old.apply(diffs);
+
+    let stmt = "
+        UPDATE users_encrypted_info
+        SET
+            encrypted_secret = $2,
+            encrypted_state = $3
+        WHERE user_id = $1
+    ";
+
+    execute!(
+        &ctx.pool,
+        stmt,
+        ctx.user.unwrap(),
+        new.secret,
+        new.settings
+    );
 
     Ok(())
 }
@@ -350,8 +425,7 @@ pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
                 status = '',
                 about_me = 'This account has been deleted by the user.',
                 activity = 'Offline',
-                avatar = NULL,
-                encrypted_secret = $3
+                avatar = NULL
             WHERE id = $1
         ";
 
@@ -367,7 +441,13 @@ pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
             &mut *tx,
             stmt,
             ctx.user.unwrap(),
-            format!("deleted.account.{extension}"),
+            format!("deleted.account.{extension}")
+        );
+
+        execute!(
+            &mut *tx,
+            "UPDATE users_encrypted_info SET encrypted_secret = $2 WHERE user_id = $1",
+            ctx.user.unwrap(),
             Vec::<u8>::new()
         );
 
@@ -382,6 +462,69 @@ pub async fn delete_user_account(ctx: &mut EchoContext) -> RouteResult<()> {
     }
 
     ctx.user = None;
+
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+pub enum UserSearchAction {
+    NextPage,
+    ChangeQuery(String)
+}
+
+/// A result from searching for user accounts.
+#[derive(Deserialize, FromRow, Serialize)]
+pub struct UserSearchResult {
+    pub id: SnowflakeID,
+    pub username: String,
+    pub avatar: Option<AssetID>
+}
+
+#[route("users.search")]
+pub async fn search_for_users(ctx: &mut EchoContext) -> RouteResult<()> {
+    let stmt = "
+        SELECT
+            id,
+            name,
+            avatar
+        FROM users
+        WHERE name LIKE $1 || '%'
+            AND name > $2
+        COLLATE case_insensitive
+        LIMIT 50
+    ";
+
+    let mut base: String = ctx.stream.receive().await?;
+
+    let mut last_username_seen = String::new();
+
+    loop {
+        let results: Vec<UserSearchResult> = fetch_all_as!(
+            &ctx.pool,
+            stmt,
+            &base,
+            &last_username_seen
+        );
+
+        ctx.stream.send(&results).await?;
+
+        if results.is_empty() {
+            break;
+        }
+
+        let search_action: UserSearchAction = ctx.stream.receive().await?;
+
+        if let UserSearchAction::ChangeQuery(new_base) = search_action {
+            base = new_base;
+            last_username_seen = String::new();
+
+            continue;
+        }
+
+        if let Some(last_result) = results.last() {
+            last_username_seen = last_result.username.clone();
+        }
+    }
 
     Ok(())
 }

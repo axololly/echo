@@ -4,7 +4,7 @@ use std::{collections::HashMap, fmt::format, net::{SocketAddr, ToSocketAddrs}, p
 
 use chrono::TimeDelta;
 use echo_server::{error::RouteError, events::Event, router::EchoRouter, routes::{AddFriendToGroupData, AddNewReactionData, CreateNewEmojiData, CreateNewGroupData, CreateNewUserData, DeleteGroupEmojiData, EncryptedChatSession, GetMessageHistoryData, MessageHistoryParams, RemoveReactionData, SendMessageData, UnprocessedMessage, UpdateDefaultMessageTimerData, UpdateMessagePinData, UpdateReadWatermarkData}, runner::run, stream::Stream};
-use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings, UserState};
+use echo_types::{AssetID, Attachment, BoxPublicKey, Compressed, CryptoBox, Emoji, Encrypted, Friend, FriendRequest, Group, Message, MessageBody, PasswordProtected, Reaction, Secret, SnowflakeID, User, UserSettings};
 use pgtemp::PgTempDB;
 use quinn::{crypto::rustls::QuicClientConfig, rustls};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -105,7 +105,7 @@ static PORT_NUM: AtomicU16 = AtomicU16::new(0);
 async fn connect_and_create_account(
     username: &str,
     cert: CertificateDer<'static>
-) -> Result<(User, quinn::Connection)> {
+) -> Result<(User, Secret, quinn::Connection)> {
     let port_num = PORT_NUM.fetch_add(1, Ordering::Relaxed);
 
     let parent = connect_to_server(
@@ -120,13 +120,11 @@ async fn connect_and_create_account(
         let data = CreateNewUserData {
             username: username.to_string(),
             secret: PasswordProtected::new(&secret, DEFAULT_PASSWORD),
-            state: secret.encrypt(&UserState {
-                settings: UserSettings {
-                    logout_after: 0,
-                    enable_read_receipts: true,
-                    enable_typing_indicators: true,
-                    ignore_future_requests_from: vec![]
-                }
+            settings: secret.encrypt(&UserSettings {
+                logout_after: 0,
+                enable_read_receipts: true,
+                enable_typing_indicators: true,
+                ignore_future_requests_from: vec![]
             }),
             signature_verifier: secret.into(),
             box_public_key: secret.into()
@@ -175,7 +173,7 @@ async fn connect_and_create_account(
         }
     });
 
-    Ok((account, parent))
+    Ok((account, secret, parent))
 }
 
 /// Form a friend request between two users, and get the Olm sessions used
@@ -205,15 +203,13 @@ async fn establish_friendship(
 }
 
 async fn send_message(
-    user: &User,
+    user_secret: Secret,
     user_conn: &quinn::Connection,
     conversation_id: SnowflakeID,
     message: &str,
     attachments: Vec<Attachment>,
     delete_after: Option<TimeDelta>
 ) -> Result<(Message, Secret)> {
-    let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
-
     let message_secret = Secret::random();
 
     let encrypted_attachments: Vec<_> = attachments
@@ -287,10 +283,9 @@ async fn send_message(
 }
 
 async fn process_messages(
-    user: &User,
+    user_secret: Secret,
     user_conn: &quinn::Connection
 ) -> Result<HashMap<SnowflakeID, Secret>> {
-    let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
     let mut message_secrets = HashMap::new();
 
     access_route(user_conn, "messages.unread.process", async |stream| {
@@ -335,13 +330,11 @@ async fn process_messages(
 }
 
 async fn fetch_message_history(
-    user: &User,
+    user_secret: Secret,
     user_conn: &quinn::Connection,
     conversation_id: SnowflakeID,
     params: MessageHistoryParams
 ) -> Result<Vec<(Message, Secret)>> {
-    let user_secret = user.secret.unlock(DEFAULT_PASSWORD)?;
-
     access_route(user_conn, "messages.history.get", async |stream| {
         stream.send(&GetMessageHistoryData {
             conversation_id,
@@ -663,9 +656,9 @@ async fn main() -> Result<()> {
         asset_storage_path
     ));
 
-    let (alice, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
-    let (bob, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
-    let (chloe, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
+    let (alice, alice_secret, alice_conn) = connect_and_create_account("alice", cert.clone()).await?;
+    let (bob, bob_secret, bob_conn) = connect_and_create_account("bob", cert.clone()).await?;
+    let (chloe, chloe_secret, chloe_conn) = connect_and_create_account("chloe", cert.clone()).await?;
 
     establish_friendship(
         (&alice_conn, &alice),
@@ -689,7 +682,7 @@ async fn main() -> Result<()> {
     }).await?;
 
     let (msg, _) = send_message(
-        &bob,
+        bob_secret,
         &bob_conn,
         group.id,
         "hello guys",
@@ -710,7 +703,7 @@ async fn main() -> Result<()> {
     fetch_message(&alice_conn, msg.id).await?;
 
     let (msg2, _) = send_message(
-        &chloe,
+        chloe_secret,
         &chloe_conn,
         group.id,
         "hello guys",

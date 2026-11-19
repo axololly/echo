@@ -20,6 +20,15 @@ CREATE TABLE users (
     activity "Activity" NOT NULL,
     about_me TEXT NOT NULL CHECK (char_length(about_me) <= 2000),
     status TEXT NOT NULL CHECK (char_length(status) <= 200),
+    show_in_searches BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE users_encrypted_info (
+    user_id INT8 NOT NULL
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
     encrypted_secret BYTEA NOT NULL,
     encrypted_state BYTEA NOT NULL
 );
