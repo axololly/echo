@@ -63,21 +63,25 @@ impl EchoRouter {
         use crate::routes::*;
 
         // User routes
-        router.register_route(get_user);
-        router.register_route(create_new_user);
         router.register_route(login);
+        router.register_route(get_user);
+        router.register_route(get_user_public_keys);
+        router.register_route(get_user_encrypted_info);
+        router.register_route(create_new_user);
+        router.register_route(update_user_profile);
+        router.register_route(update_user_encrypted_info);
+        router.register_route(subscribe_to_profile_updates);
+        router.register_route(unsubscribe_from_profile_updates);
+        router.register_route(unsubscribe_from_all_profile_updates);
+        router.register_route(delete_user_account);
+        router.register_route(search_for_users);
         router.register_route(get_user_friends);
         router.register_route(remove_friend);
         router.register_route(get_friend_requests);
         router.register_route(create_friend_request);
         router.register_route(accept_friend_request);
-        router.register_route(cancel_friend_request);
         router.register_route(decline_friend_request);
-        router.register_route(update_user_account);
-        router.register_route(subscribe_to_profile_updates);
-        router.register_route(unsubscribe_from_profile_updates);
-        router.register_route(unsubscribe_from_all_profile_updates);
-        router.register_route(delete_user_account);
+        router.register_route(cancel_friend_request);
 
         // Event listener route
         router.register_route(listen_to_events);
@@ -87,37 +91,41 @@ impl EchoRouter {
         router.register_route(get_group);
         router.register_route(update_group_appearance);
         router.register_route(join_group);
-        router.register_route(leave_group);
         router.register_route(add_friend_to_group);
+        router.register_route(leave_group);
         router.register_route(kick_group_member);
         router.register_route(ban_group_member);
         router.register_route(unban_group_member);
         router.register_route(get_banned_members_list);
         router.register_route(rotate_group_invite_code);
         router.register_route(change_group_lock);
-        router.register_route(create_new_group_emoji);
+        router.register_route(get_group_emoji);
         router.register_route(get_all_group_emoji_ids);
+        router.register_route(create_new_group_emoji);
         router.register_route(delete_group_emoji);
 
         // Message routes
         router.register_route(get_latest_conversation_session);
         router.register_route(ensure_latest_conversation_session);
-        router.register_route(get_message_history);
         router.register_route(send_message);
+        router.register_route(get_message_history);
         router.register_route(process_unread_messages);
         router.register_route(update_pin_status_on_message);
+        router.register_route(get_all_pinned_message_ids);
         router.register_route(get_message);
+        router.register_route(edit_message);
+        router.register_route(delete_message);
         router.register_route(add_new_reaction);
-        router.register_route(get_message_reactions);
         router.register_route(remove_reaction);
+        router.register_route(get_message_reactions);
         router.register_route(update_read_watermark);
 
         // Conversation routes
         router.register_route(get_default_message_timer);
         router.register_route(update_default_message_timer);
-        router.register_route(start_typing_in_conversation);
         router.register_route(subscribe_to_typing_events);
         router.register_route(unsubscribe_from_all_typing_events);
+        router.register_route(start_typing_in_conversation);
 
         // Asset route
         router.register_route(fetch_asset);

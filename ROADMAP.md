@@ -1,5 +1,9 @@
 # ROADMAP
 
+## Remaining Features
+
+- [ ] Allow users to search for other users by name
+
 ## Rejected Features  
 
 - Be able to ignore future friend requests from a specific user (without notifying them)
